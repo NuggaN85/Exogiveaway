@@ -31,7 +31,8 @@ Ce bot permet aux administrateurs de créer des giveaways avec des prix, un nomb
 3. Créez un fichier `.env` à la racine du projet avec :
 
 ```plaintext
-TOKEN=VOTRE_TOKEN_DE_BOT
+DISCORD_TOKEN=VOTRE_TOKEN_DE_BOT
+CLIENT_ID=VOTRE_CLIENT_ID
 ```
 
 4. Lancez le bot avec `node index.js`.
