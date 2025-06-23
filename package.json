@@ -1,0 +1,17 @@
+{
+  "name": "EXOGIVEAWAY",
+  "version": "1.0.4",
+  "description": "Je suis un bot conçu pour vous aider à créé des giveaways en un clin d'œil !",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "author": "EXOBOT",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.19.3",
+    "node-fetch": "^3.3.2",
+    "dotenv": "^16.5.0"
+  }
+}
