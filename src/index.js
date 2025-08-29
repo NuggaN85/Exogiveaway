@@ -1,8 +1,8 @@
 import { fileURLToPath } from 'url';
 import path from 'path';
 import dotenv from 'dotenv';
+import Database from 'better-sqlite3';
 import { Client, Collection, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType, SlashCommandBuilder, ActivityType } from 'discord.js';
-import { promises as fs } from 'fs';
 
 // Définir __dirname pour les modules ES
 const __filename = fileURLToPath(import.meta.url);
@@ -11,7 +11,25 @@ const __dirname = path.dirname(__filename);
 // Configuration des variables d'environnement
 dotenv.config();
 
-// Créer une nouvelle instance de client avec les intents nécessaires
+// Initialisation de la base de données SQLite
+const db = new Database(path.join(__dirname, 'giveaways.db'));
+db.exec(`
+  CREATE TABLE IF NOT EXISTS giveaways (
+    messageId TEXT PRIMARY KEY,
+    channelId TEXT,
+    guildId TEXT,
+    prix TEXT,
+    gagnants INTEGER,
+    endTime INTEGER,
+    participants TEXT,
+    rôleRequis TEXT,
+    commentaire TEXT,
+    image TEXT,
+    organizer TEXT
+  )
+`);
+
+// Créer une nouvelle instance de client
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
   partials: [Partials.Channel, Partials.Message, Partials.User, Partials.GuildMember]
@@ -33,17 +51,39 @@ const limit = (userId, cooldown = 1000) => {
 };
 
 // Gestion des giveaways
-const storagePath = path.join(__dirname, 'giveaways.json');
-const loadGiveaways = async () => {
-  try {
-    const data = await fs.readFile(storagePath, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    return {};
+const loadGiveaways = () => {
+  const rows = db.prepare('SELECT * FROM giveaways').all();
+  const giveaways = {};
+  for (const row of rows) {
+    row.participants = JSON.parse(row.participants || '[]');
+    giveaways[row.messageId] = row;
   }
+  return giveaways;
 };
-const saveGiveaways = async (giveaways) => {
-  await fs.writeFile(storagePath, JSON.stringify(giveaways, null, 2));
+
+const saveGiveaway = (giveaway) => {
+  const stmt = db.prepare(`
+    INSERT OR REPLACE INTO giveaways (
+      messageId, channelId, guildId, prix, gagnants, endTime, participants, rôleRequis, commentaire, image, organizer
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  stmt.run(
+    giveaway.messageId,
+    giveaway.channelId,
+    giveaway.guildId,
+    giveaway.prix,
+    giveaway.gagnants,
+    giveaway.endTime,
+    JSON.stringify(giveaway.participants),
+    giveaway.rôleRequis,
+    giveaway.commentaire,
+    giveaway.image,
+    giveaway.organizer
+  );
+};
+
+const deleteGiveaway = (messageId) => {
+  db.prepare('DELETE FROM giveaways WHERE messageId = ?').run(messageId);
 };
 
 // Création d'embed
@@ -70,15 +110,15 @@ function formatTime(ms) {
 }
 
 function updateActivity() {
-    client.user.setActivity(`Je suis sur ${client.guilds.cache.size} serveurs`, { type: ActivityType.Custom });
+  client.user.setActivity(`Je suis sur ${client.guilds.cache.size} serveurs`, { type: ActivityType.Custom });
 }
 
 client.on("guildCreate", async guild => {
-    updateActivity();
+  updateActivity();
 });
 
 client.on("guildDelete", async guild => {
-    updateActivity();
+  updateActivity();
 });
 
 // Événement ready
@@ -86,24 +126,25 @@ client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}!`);
   updateActivity();
 
-  const giveaways = await loadGiveaways();
+  const giveaways = loadGiveaways();
   for (const messageId in giveaways) {
     const giveaway = giveaways[messageId];
     const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
-    if (!channel) continue;
+    if (!channel) {
+      deleteGiveaway(messageId);
+      continue;
+    }
 
     const message = await channel.messages.fetch(messageId).catch(() => null);
     if (!message) {
-      delete giveaways[messageId];
-      await saveGiveaways(giveaways);
+      deleteGiveaway(messageId);
       continue;
     }
 
     const participants = new Set(giveaway.participants);
     const remainingTime = giveaway.endTime - Date.now();
     if (remainingTime <= 0) {
-      delete giveaways[messageId];
-      await saveGiveaways(giveaways);
+      deleteGiveaway(messageId);
       continue;
     }
 
@@ -115,7 +156,6 @@ client.once('ready', async () => {
         **🏆 Gagnants** : ${giveaway.gagnants}
         **⏳ Temps restant** : ${formatTime(remainingTime)}
         **👥 Participants** : ${participants.size}
-        ${roleRequired ? `**🔒 Rôle requis** : ${roleRequired}` : ''}
       `,
       giveaway.organizer,
       giveaway.commentaire
@@ -123,7 +163,7 @@ client.once('ready', async () => {
       .setThumbnail(channel.guild.iconURL({ dynamic: true }))
       .setFooter({ text: 'Cliquez pour participer !', iconURL: channel.guild.iconURL() })
       .setTimestamp()
-      .setImage('https://i.imgur.com/7ztYQMB.png');
+      .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
 
     const row = new ActionRowBuilder()
       .addComponents(
@@ -142,8 +182,7 @@ client.once('ready', async () => {
           return i.reply({ content: '❌ Pas les permissions nécessaires.', ephemeral: true });
         }
         collector.stop('cancelled');
-        delete giveaways[messageId];
-        await saveGiveaways(giveaways);
+        deleteGiveaway(messageId);
         await i.reply({ content: '⚠️ Giveaway annulé.', ephemeral: true });
         return;
       }
@@ -165,12 +204,12 @@ client.once('ready', async () => {
       }
 
       if (participants.has(i.user.id)) {
-        return i.reply({ content: '❌ Vous participez déjà.', ephemeral: true });
+        return i.reply({ content: '❌ Vous participez déjà au giveaway.', ephemeral: true });
       }
 
       participants.add(i.user.id);
-      giveaways[messageId].participants = Array.from(participants);
-      await saveGiveaways(giveaways);
+      giveaway.participants = Array.from(participants);
+      saveGiveaway(giveaway);
 
       await i.reply({ content: '👍 Vous participez ! Bonne chance !', ephemeral: true });
 
@@ -189,7 +228,7 @@ client.once('ready', async () => {
         .setThumbnail(i.guild.iconURL({ dynamic: true }))
         .setFooter({ text: 'Cliquez pour participer !', iconURL: i.guild.iconURL() })
         .setTimestamp()
-        .setImage('https://i.imgur.com/7ztYQMB.png');
+        .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
 
       await message.edit({ embeds: [updatedEmbed] });
     });
@@ -216,7 +255,7 @@ client.once('ready', async () => {
         .setThumbnail(channel.guild.iconURL({ dynamic: true }))
         .setFooter({ text: 'Cliquez pour participer !', iconURL: channel.guild.iconURL() })
         .setTimestamp()
-        .setImage('https://i.imgur.com/7ztYQMB.png');
+        .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
 
       await message.edit({ embeds: [updatedEmbed] });
     }, 60000);
@@ -230,26 +269,28 @@ client.once('ready', async () => {
           .setFooter({ text: 'Merci à tous !', iconURL: channel.guild.iconURL() })
           .setTimestamp();
         await message.edit({ embeds: [cancelledEmbed], components: [] });
-        delete giveaways[messageId];
-        await saveGiveaways(giveaways);
+        deleteGiveaway(messageId);
         return;
       }
 
       const winners = Array.from(participants).slice(0, giveaway.gagnants).map(id => channel.guild.members.cache.get(id)).filter(Boolean);
       const winnerEmbed = createEmbed(
-        '🏆 Giveaway Terminé 🏆',
-        `
-          **🎉 Félicitations aux gagnants !**
-          ${winners.length ? winners.map(w => `• ${w.user.tag}`).join('\n') : 'Aucun participant.'}
-          **🎁 Prix** : ${giveaway.prix}
-          **🏆 Gagnants** : ${giveaway.gagnants}
-        `,
+        '🎊 Giveaway Conclu avec Succès ! 🎊',
+        winners.length
+          ? `**Félicitations aux gagnants !**\n${winners.map(w => `• ${w.user.tag} (<@${w.id}>)`).join('\n')}\n\nMerci à tous pour votre participation ! De nouveaux giveaways arrivent bientôt, restez à l'affût !`
+          : 'Aucun participant pour ce giveaway. Tentez votre chance la prochaine fois !',
         giveaway.organizer,
-        giveaway.commentaire
+        giveaway.commentaire,
+        0x2ECC71
       )
+        .addFields(
+          { name: '🎁 Prix', value: giveaway.prix, inline: true },
+          { name: '🏆 Nombre de gagnants', value: `${giveaway.gagnants}`, inline: true }
+        )
         .setThumbnail(channel.guild.iconURL({ dynamic: true }))
-        .setFooter({ text: 'Merci à tous les participants !', iconURL: channel.guild.iconURL() })
-        .setTimestamp();
+        .setFooter({ text: 'Merci d\'avoir participé !', iconURL: channel.guild.iconURL() })
+        .setTimestamp()
+        .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
 
       await message.edit({ embeds: [winnerEmbed], components: [] });
 
@@ -280,8 +321,7 @@ client.once('ready', async () => {
         await thread.send({ content: winners.map(w => `<@${w.id}>`).join(', '), embeds: [threadEmbed] });
       }
 
-      delete giveaways[messageId];
-      await saveGiveaways(giveaways);
+      deleteGiveaway(messageId);
     });
   }
 });
@@ -352,6 +392,11 @@ client.commands.set('giveaway', {
       option.setName('commentaire')
         .setDescription('Commentaire ou informations supplémentaires (optionnel)')
         .setRequired(false)
+    )
+    .addStringOption(option =>
+      option.setName('image')
+        .setDescription('URL de l\'image pour le giveaway (optionnel)')
+        .setRequired(false)
     ),
   async execute(interaction) {
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
@@ -364,6 +409,7 @@ client.commands.set('giveaway', {
     const rôleRequis = interaction.options.getRole('rôle_requis');
     const rôleMention = interaction.options.getRole('rôle_mention');
     const commentaire = interaction.options.getString('commentaire');
+    const image = interaction.options.getString('image');
     const organizer = interaction.user.id;
 
     const duréeMap = {
@@ -386,7 +432,7 @@ client.commands.set('giveaway', {
     }[duréeInput];
 
     const embed = createEmbed(
-      '🎉 Nouveau Giveaway 🎉',
+      '🎉 Nouveau Giveaway en Cours 🎉',
       `
         **🎁 Prix** : ${prix}
         **🏆 Gagnants** : ${gagnants}
@@ -399,7 +445,7 @@ client.commands.set('giveaway', {
       .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
       .setFooter({ text: 'Cliquez pour participer !', iconURL: interaction.guild.iconURL() })
       .setTimestamp()
-      .setImage('https://i.imgur.com/7ztYQMB.png');
+      .setImage(image || 'https://i.imgur.com/w5JVwaR.png');
 
     const row = new ActionRowBuilder()
       .addComponents(
@@ -408,7 +454,7 @@ client.commands.set('giveaway', {
         new ButtonBuilder().setCustomId('show_participants').setLabel('Participants').setStyle(ButtonStyle.Secondary).setEmoji('👥')
       );
 
-    const content = rôleMention ? `<@&${rôleMention.id}> Nouveau giveaway a été lancé` : null;
+    const content = rôleMention ? `<@&${rôleMention.id}> Un nouveau giveaway vient de commencer !` : null;
 
     const message = await interaction.reply({
       content,
@@ -417,9 +463,10 @@ client.commands.set('giveaway', {
       fetchReply: true
     });
 
-    const giveaways = await loadGiveaways();
+    const giveaways = loadGiveaways();
     const participants = new Set();
-    giveaways[message.id] = {
+    const giveaway = {
+      messageId: message.id,
       channelId: interaction.channelId,
       guildId: interaction.guildId,
       prix,
@@ -428,9 +475,11 @@ client.commands.set('giveaway', {
       participants: Array.from(participants),
       rôleRequis: rôleRequis ? rôleRequis.id : null,
       commentaire: commentaire || null,
+      image: image || null,
       organizer
     };
-    await saveGiveaways(giveaways);
+    giveaways[message.id] = giveaway;
+    saveGiveaway(giveaway);
 
     const collector = message.createMessageComponentCollector({ time: duréeMs });
 
@@ -444,8 +493,7 @@ client.commands.set('giveaway', {
           return i.reply({ content: '❌ Permissions insuffisantes pour annuler.', ephemeral: true });
         }
         collector.stop('cancelled');
-        delete giveaways[message.id];
-        await saveGiveaways(giveaways);
+        deleteGiveaway(message.id);
         await i.reply({ content: '⚠️ Giveaway annulé.', ephemeral: true });
         return;
       }
@@ -463,12 +511,12 @@ client.commands.set('giveaway', {
       }
 
       if (participants.has(i.user.id)) {
-        return i.reply({ content: '❌ Vous participez déjà.', ephemeral: true });
+        return i.reply({ content: '❌ Vous participez déjà au giveaway.', ephemeral: true });
       }
 
       participants.add(i.user.id);
       giveaways[message.id].participants = Array.from(participants);
-      await saveGiveaways(giveaways);
+      saveGiveaway(giveaways[message.id]);
 
       await i.reply({ content: '✅ Vous avez rejoint le giveaway ! Bonne chance !', ephemeral: true });
 
@@ -487,7 +535,7 @@ client.commands.set('giveaway', {
         .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
         .setFooter({ text: 'Cliquez pour participer !', iconURL: interaction.guild.iconURL() })
         .setTimestamp()
-        .setImage('https://i.imgur.com/7ztYQMB.png');
+        .setImage(image || 'https://i.imgur.com/w5JVwaR.png');
 
       await message.edit({ embeds: [updatedEmbed] });
     });
@@ -514,7 +562,7 @@ client.commands.set('giveaway', {
         .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
         .setFooter({ text: 'Cliquez pour participer !', iconURL: interaction.guild.iconURL() })
         .setTimestamp()
-        .setImage('https://i.imgur.com/7ztYQMB.png');
+        .setImage(image || 'https://i.imgur.com/w5JVwaR.png');
 
       await message.edit({ embeds: [updatedEmbed] });
     }, 60000);
@@ -529,26 +577,28 @@ client.commands.set('giveaway', {
           .setFooter({ text: 'Merci à tous !', iconURL: interaction.guild.iconURL() })
           .setTimestamp();
         await message.edit({ embeds: [cancelledEmbed], components: [] });
-        delete giveaways[message.id];
-        await saveGiveaways(giveaways);
+        deleteGiveaway(message.id);
         return;
       }
 
       const winners = Array.from(participants).slice(0, gagnants).map(id => interaction.guild.members.cache.get(id)).filter(Boolean);
       const winnerEmbed = createEmbed(
-        '🏆 Giveaway Terminé 🏆',
-        `
-          **🎉 Félicitations aux gagnants !**
-          ${winners.length ? winners.map(w => `• ${w.user.tag}`).join('\n') : 'Aucun participant.'}
-          **🎁 Prix** : ${prix}
-          **🏆 Gagnants** : ${gagnants}
-        `,
+        '🎊 Giveaway Conclu avec Succès ! 🎊',
+        winners.length
+          ? `**Félicitations aux gagnants !**\n${winners.map(w => `• ${w.user.tag} (<@${w.id}>)`).join('\n')}\n\nMerci à tous pour votre participation ! De nouveaux giveaways arrivent bientôt, restez à l'affût !`
+          : 'Aucun participant pour ce giveaway. Tentez votre chance la prochaine fois !',
         organizer,
-        commentaire
+        commentaire,
+        0x2ECC71
       )
+        .addFields(
+          { name: '🎁 Prix', value: prix, inline: true },
+          { name: '🏆 Nombre de gagnants', value: `${gagnants}`, inline: true }
+        )
         .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
-        .setFooter({ text: 'Merci à tous les participants !', iconURL: interaction.guild.iconURL() })
-        .setTimestamp();
+        .setFooter({ text: 'Merci d\'avoir participé !', iconURL: interaction.guild.iconURL() })
+        .setTimestamp()
+        .setImage(image || 'https://i.imgur.com/w5JVwaR.png');
 
       await message.edit({ embeds: [winnerEmbed], components: [] });
 
@@ -579,8 +629,7 @@ client.commands.set('giveaway', {
         await thread.send({ content: winners.map(w => `<@${w.id}>`).join(', '), embeds: [threadEmbed] });
       }
 
-      delete giveaways[message.id];
-      await saveGiveaways(giveaways);
+      deleteGiveaway(message.id);
     });
   }
 });
