@@ -1,19 +1,34 @@
 {
   "name": "EXOGIVEAWAY",
   "version": "1.0.4",
-  "description": "Je suis un bot conçu pour vous aider à créé des giveaways en un clin d'œil !",
+  "description": "Créez des giveaways attractifs et virals en quelques secondes.",
+  "homepage": "https://rl-informatique.fr",
   "type": "module",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node src/index.js"
-  },
   "author": "EXOBOT",
   "license": "MIT",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "prod": "NODE_ENV=production node src/bot.js",
+    "update": "npm-run-all -s update:deps audit fix",
+    "update:deps": "npx npm-check-updates -u && npm install",
+    "update:interactive": "npx npm-check-updates -i",
+    "audit": "npm audit --audit-level=moderate",
+    "fix": "npm audit fix --force",
+    "clean": "rm -rf node_modules package-lock.json && npm install",
+    "check": "npm outdated"
+  },
   "dependencies": {
-    "better-sqlite3": "^12.2.0",
-    "discord.js": "^14.21.0",
-    "dotenv": "^17.2.1",
+    "better-sqlite3": "^12.4.1",
+    "discord.js": "^14.23.2",
+    "dotenv": "^17.2.3",
     "node-fetch": "^3.3.2",
+    "node-cache": "^5.1.2",
     "kleur": "^4.1.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10",
+    "npm-check-updates": "^19.0.0",
+    "npm-run-all": "^4.1.5"
   }
 }
