@@ -70,6 +70,6 @@ Pour questions ou suggestions, ouvrez une issue ou contactez-moi directement.
 
 ---
 
-[![Donate](https://img.shields.io/badge/paypal-donate-yellow.svg?style=flat)](https://www.paypal.me/nuggan85) [![v1.1.4](http://img.shields.io/badge/zip-v1.1.4-blue.svg)](https://github.com/NuggaN85/Exogiveaway/archive/master.zip) [![GitHub license](https://img.shields.io/github/license/NuggaN85/Exogiveaway)](https://github.com/NuggaN85/Exogiveaway)
+[![Donate](https://img.shields.io/badge/paypal-donate-yellow.svg?style=flat)](https://www.paypal.me/nuggan85) [![v1.1.4](http://img.shields.io/badge/zip-v1.1.4-blue.svg)](https://github.com/NuggaN85/Exogiveaway/archive/master.zip) [![GitHub license](https://img.shields.io/github/license/NuggaN85/Exogiveaway)](https://github.com/NuggaN85/Exogiveaway) ![Platform](https://img.shields.io/badge/Platform-Discord-lightgrey)  
 
 © 2025 Ludovic Rose. Tous droits réservés.
