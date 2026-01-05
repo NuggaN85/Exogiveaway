@@ -51,7 +51,6 @@ db.pragma('temp_store = MEMORY');
 db.pragma('foreign_keys = ON');
 db.pragma('mmap_size = 268435456');
 
-
 // Migration de la base de données
 const migrateDatabase = () => {
   try {
@@ -71,11 +70,6 @@ const migrateDatabase = () => {
           commentaire TEXT,
           image TEXT,
           organizer TEXT,
-          tournament_phase TEXT DEFAULT 'single',
-          parent_tournament_id TEXT,
-          phase_number INTEGER DEFAULT 1,
-          total_phases INTEGER DEFAULT 1,
-          qualified_users TEXT DEFAULT '[]',
           giveawayId TEXT UNIQUE
         )
       `);
@@ -85,23 +79,39 @@ const migrateDatabase = () => {
     // Vérifier et ajouter les colonnes manquantes
     const columns = db.prepare("PRAGMA table_info(giveaways)").all();
     const columnNames = columns.map(col => col.name);
-    const requiredColumns = [
-      'parent_tournament_id', 'phase_number', 'total_phases', 'qualified_users',
-      'tournament_phase', 'giveawayId'
-    ];
+    const requiredColumns = ['giveawayId'];
     
     for (const column of requiredColumns) {
       if (!columnNames.includes(column)) {
         let columnType = 'TEXT';
-        if (column === 'phase_number' || column === 'total_phases') {
-          columnType = 'INTEGER';
-        }
        
         try {
-          db.exec(`ALTER TABLE giveaways ADD COLUMN ${column} ${columnType} DEFAULT ${columnType === 'INTEGER' ? '1' : "'[]'"}`);
+          db.exec(`ALTER TABLE giveaways ADD COLUMN ${column} ${columnType}`);
           console.log(`✅ Colonne ${column} ajoutée`);
         } catch (error) {
           console.log(`⚠️ Colonne ${column} déjà présente:`, error.message);
+        }
+      }
+    }
+
+    // Supprimer les colonnes liées aux tournois si elles existent
+    const tournamentColumns = ['tournament_phase', 'parent_tournament_id', 'phase_number', 'total_phases', 'qualified_users'];
+    for (const column of tournamentColumns) {
+      if (columnNames.includes(column)) {
+        try {
+          // Créer une nouvelle table sans les colonnes de tournois
+          db.exec(`
+            CREATE TABLE giveaways_new AS 
+            SELECT messageId, channelId, guildId, prix, gagnants, endTime, participants, 
+                   roleRequired, commentaire, image, organizer, giveawayId 
+            FROM giveaways
+          `);
+          db.exec('DROP TABLE giveaways');
+          db.exec('ALTER TABLE giveaways_new RENAME TO giveaways');
+          console.log(`✅ Colonnes de tournois supprimées`);
+          break;
+        } catch (error) {
+          console.log(`⚠️ Impossible de supprimer les colonnes de tournois:`, error.message);
         }
       }
     }
@@ -113,480 +123,90 @@ const migrateDatabase = () => {
 // Exécuter la migration
 migrateDatabase();
 
-// Classe pour le système de tournoi
-class TournamentSystem {
-  static generateTournamentId() {
-    return `TOURNAMENT-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+// Fonction pour démarrer le compte à rebours classique
+async function startClassicCountdown(message, giveaway, totalDuration) {
+  // Arrêter tout intervalle existant pour ce giveaway
+  if (activeIntervals.has(giveaway.messageId)) {
+    clearInterval(activeIntervals.get(giveaway.messageId));
+    activeIntervals.delete(giveaway.messageId);
   }
-
-  static parseDuration(durationStr) {
-    const units = {
-      'm': 60 * 1000,
-      'h': 60 * 60 * 1000,
-      'd': 24 * 60 * 60 * 1000,
-      'w': 7 * 24 * 60 * 60 * 1000
-    };
-   
-    const value = parseInt(durationStr);
-    const unit = durationStr.replace(value.toString(), '');
-    return value * (units[unit] || 60 * 1000); // Par défaut: minutes
-  }
-
-  static getPhaseEmoji(phaseNumber) {
-    const emojis = ['1️⃣', '2️⃣', '3️⃣', '🏆'];
-    return emojis[phaseNumber - 1] || '🎯';
-  }
-
-  static async createTournament(interaction, options) {
-    const tournamentId = this.generateTournamentId();
-   
-    // Créer la première phase
-    const firstPhase = await this.createTournamentPhase(interaction, tournamentId, {
-      name: 'Phase 1 - Qualifications',
-      duration: options.phase1Duration,
-      winners: options.phase1Winners,
-      phaseNumber: 1,
-      totalPhases: 3
-    }, options);
-    return { tournamentId, currentPhase: firstPhase };
-  }
-
-  static async createTournamentPhase(interaction, tournamentId, phase, options) {
-    const durationMs = this.parseDuration(phase.duration);
-    const endTime = Date.now() + durationMs;
-    const phaseId = `TOURNEY-${Date.now()}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
-    
-    const embed = new EmbedBuilder()
-      .setTitle(`🏆 Tournoi - ${phase.name} ${this.getPhaseEmoji(phase.phaseNumber)}`)
-      .setDescription(`
-        **🎁 Prix Final** : ${options.prix}
-        **🏆 Gagnants Phase** : ${phase.winners}
-        **⏳ Fin** : <t:${getUnixTimestamp(endTime)}:R>
-        **🔢 Phase** : ${phase.phaseNumber}/${phase.totalPhases}
-        **👥 Participants** : 0
-        ${options.roleRequired ? `**🔒 Rôle requis** : ${options.roleRequired}` : ''}
-       
-        *Les ${phase.winners} meilleurs participants se qualifieront pour la phase suivante !*
-      `)
-      .setColor(0xA8E4A0)
-      .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: `ID: ${phaseId}`, iconURL: interaction.guild.iconURL({ dynamic: true }) })
-      .setTimestamp()
-      .setImage(options.image || 'https://i.imgur.com/w5JVwaR.png');
-
-    if (options.commentaire) {
-      embed.addFields({ name: '📝 **Informations supplémentaires :**', value: `${options.commentaire}` });
-    }
-
-    // Créer les boutons selon la phase
-    const row = new ActionRowBuilder();
- 
-    if (phase.phaseNumber === 1) {
-      row.addComponents(
-        new ButtonBuilder().setCustomId('enter').setLabel('Participer').setStyle(ButtonStyle.Secondary).setEmoji('🎉'),
-        new ButtonBuilder().setCustomId('leave').setLabel('Se retirer').setStyle(ButtonStyle.Secondary).setEmoji('🚪'),
-        new ButtonBuilder().setCustomId('cancel').setLabel('Annuler').setStyle(ButtonStyle.Secondary).setEmoji('❌'),
-        new ButtonBuilder().setCustomId('show_participants').setLabel('Participants').setStyle(ButtonStyle.Secondary).setEmoji('👥')
-      );
-    } else {
-      row.addComponents(
-        new ButtonBuilder().setCustomId('show_participants').setLabel('Participants').setStyle(ButtonStyle.Secondary).setEmoji('👥'),
-        new ButtonBuilder().setCustomId('tournament_leaderboard').setLabel('Classement').setStyle(ButtonStyle.Secondary).setEmoji('🏆')
-      );
-    }
-
-    const message = await interaction.channel.send({
-      embeds: [embed],
-      components: [row]
-    });
-
-    const participants = phase.phaseNumber === 1 ? [] : (options.previousQualified || []);
-    const giveaway = {
-      messageId: message.id,
-      channelId: interaction.channelId,
-      guildId: interaction.guildId,
-      prix: options.prix,
-      gagnants: phase.winners,
-      endTime: endTime,
-      participants: participants,
-      roleRequired: options.roleRequired ? options.roleRequired.id : null,
-      commentaire: options.commentaire || null,
-      image: options.image || null,
-      organizer: interaction.user.id,
-      tournament_phase: 'tournament',
-      parent_tournament_id: tournamentId,
-      phase_number: phase.phaseNumber,
-      total_phases: phase.totalPhases,
-      qualified_users: [],
-      giveawayId: phaseId
-    };
-
-    saveGiveaway(giveaway);
-    this.startPhaseCountdown(message, giveaway, phase, durationMs);
- 
-    return giveaway;
-  }
-
-  static async startPhaseCountdown(message, giveaway, phase, totalDuration) {
-    // Arrêter tout intervalle existant pour ce giveaway
-    if (activeIntervals.has(giveaway.messageId)) {
-      clearInterval(activeIntervals.get(giveaway.messageId));
-      activeIntervals.delete(giveaway.messageId);
-    }
-    
-    // Fonction de vérification initiale
-    const checkInitial = async () => {
-      const currentGiveaway = giveawaysCache.get(giveaway.messageId);
-      if (!currentGiveaway) {
-        if (activeIntervals.has(giveaway.messageId)) {
-          clearInterval(activeIntervals.get(giveaway.messageId));
-          activeIntervals.delete(giveaway.messageId);
-        }
-        return;
-      }
-      
-      const remainingTime = currentGiveaway.endTime - Date.now();
-      
-      // Vérifier si le temps est écoulé
-      if (remainingTime <= 0) {
-        if (activeIntervals.has(giveaway.messageId)) {
-          clearInterval(activeIntervals.get(giveaway.messageId));
-          activeIntervals.delete(giveaway.messageId);
-        }
-        await this.endTournamentPhase(message, currentGiveaway);
-        return;
-      }
-    };
-    
-    // Exécuter la vérification initiale immédiatement
-    await checkInitial();
-    
-    // Démarrer l'intervalle
-    const interval = setInterval(async () => {
-      try {
-        const currentGiveaway = giveawaysCache.get(giveaway.messageId);
-        if (!currentGiveaway) {
-          clearInterval(interval);
-          activeIntervals.delete(giveaway.messageId);
-          return;
-        }
-        
-        const remainingTime = currentGiveaway.endTime - Date.now();
-        
-        // Vérifier si le temps est écoulé
-        if (remainingTime <= 0) {
-          clearInterval(interval);
-          activeIntervals.delete(giveaway.messageId);
-          await this.endTournamentPhase(message, currentGiveaway);
-          return;
-        }
-
-        const updatedEmbed = new EmbedBuilder()
-          .setTitle(`🏆 Tournoi - ${phase.name} ${this.getPhaseEmoji(phase.phaseNumber)}`)
-          .setDescription(`
-            **🎁 Prix Final** : ${giveaway.prix}
-            **🏆 Gagnants Phase** : ${phase.winners}
-            **⏳ Fin** : <t:${getUnixTimestamp(currentGiveaway.endTime)}:R>
-            **🔢 Phase** : ${phase.phaseNumber}/${phase.totalPhases}
-            **👥 Participants** : ${currentGiveaway.participants.length}
-            ${giveaway.roleRequired ? `**🔒 Rôle requis** : <@&${giveaway.roleRequired}>` : ''}
-           
-            *Les ${phase.winners} meilleurs participants se qualifieront pour la phase suivante !*
-          `)
-          .setColor(0xA8E4A0)
-          .setThumbnail(message.guild.iconURL({ dynamic: true }))
-          .setFooter({ text: `ID: ${giveaway.giveawayId} Tournoi - Phase ${phase.phaseNumber}`, iconURL: message.guild.iconURL({ dynamic: true }) })
-          .setTimestamp()
-          .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
-
-        if (giveaway.commentaire) {
-          updatedEmbed.addFields({ name: '📝 **Informations supplémentaires :**', value: `${giveaway.commentaire}` });
-        }
-
-        await message.edit({ embeds: [updatedEmbed] }).catch(() => {
-          clearInterval(interval);
-          activeIntervals.delete(giveaway.messageId);
-        });
-      } catch (error) {
-        console.error('Erreur dans le compte à rebours:', error);
-        clearInterval(interval);
+  
+  // Fonction de vérification initiale
+  const checkInitial = async () => {
+    const currentGiveaway = giveawaysCache.get(giveaway.messageId);
+    if (!currentGiveaway) {
+      if (activeIntervals.has(giveaway.messageId)) {
+        clearInterval(activeIntervals.get(giveaway.messageId));
         activeIntervals.delete(giveaway.messageId);
       }
-    }, 30000); // Mise à jour toutes les 30 secondes
-    
-    // Stocker l'intervalle pour gestion future
-    activeIntervals.set(giveaway.messageId, interval);
-  }
-
-  static async startClassicCountdown(message, giveaway, totalDuration) {
-    // Arrêter tout intervalle existant pour ce giveaway
-    if (activeIntervals.has(giveaway.messageId)) {
-      clearInterval(activeIntervals.get(giveaway.messageId));
-      activeIntervals.delete(giveaway.messageId);
+      return;
     }
     
-    // Fonction de vérification initiale
-    const checkInitial = async () => {
+    const remainingTime = currentGiveaway.endTime - Date.now();
+    
+    // Vérifier si le temps est écoulé
+    if (remainingTime <= 0) {
+      if (activeIntervals.has(giveaway.messageId)) {
+        clearInterval(activeIntervals.get(giveaway.messageId));
+        activeIntervals.delete(giveaway.messageId);
+      }
+      await endClassicGiveaway(message, currentGiveaway);
+      return;
+    }
+  };
+  
+  // Exécuter la vérification initiale immédiatement
+  await checkInitial();
+  
+  // Démarrer l'intervalle
+  const interval = setInterval(async () => {
+    try {
       const currentGiveaway = giveawaysCache.get(giveaway.messageId);
       if (!currentGiveaway) {
-        if (activeIntervals.has(giveaway.messageId)) {
-          clearInterval(activeIntervals.get(giveaway.messageId));
-          activeIntervals.delete(giveaway.messageId);
-        }
+        clearInterval(interval);
+        activeIntervals.delete(giveaway.messageId);
         return;
       }
       
       const remainingTime = currentGiveaway.endTime - Date.now();
-      
-      // Vérifier si le temps est écoulé
       if (remainingTime <= 0) {
-        if (activeIntervals.has(giveaway.messageId)) {
-          clearInterval(activeIntervals.get(giveaway.messageId));
-          activeIntervals.delete(giveaway.messageId);
-        }
+        clearInterval(interval);
+        activeIntervals.delete(giveaway.messageId);
         await endClassicGiveaway(message, currentGiveaway);
         return;
       }
-    };
-    
-    // Exécuter la vérification initiale immédiatement
-    await checkInitial();
-    
-    // Démarrer l'intervalle
-    const interval = setInterval(async () => {
-      try {
-        const currentGiveaway = giveawaysCache.get(giveaway.messageId);
-        if (!currentGiveaway) {
-          clearInterval(interval);
-          activeIntervals.delete(giveaway.messageId);
-          return;
-        }
-        
-        const remainingTime = currentGiveaway.endTime - Date.now();
-        if (remainingTime <= 0) {
-          clearInterval(interval);
-          activeIntervals.delete(giveaway.messageId);
-          await endClassicGiveaway(message, currentGiveaway);
-          return;
-        }
-        
-        const updatedEmbed = new EmbedBuilder()
-          .setTitle('🎉 Giveaway en Cours 🎉')
-          .setDescription(`
-            **🎁 Prix** : ${giveaway.prix}
-            **🏆 Gagnants** : ${giveaway.gagnants}
-            **⏳ Fin** : <t:${getUnixTimestamp(currentGiveaway.endTime)}:R>
-            **👥 Participants** : ${currentGiveaway.participants.length}
-            ${giveaway.roleRequired ? `**🔒 Rôle requis** : <@&${giveaway.roleRequired}>` : ''}
-          `)
-          .setColor(0xA8E4A0)
-          .setThumbnail(message.guild.iconURL({ dynamic: true }))
-          .setFooter({ text: `ID: ${giveaway.giveawayId}`, iconURL: message.guild.iconURL({ dynamic: true }) })
-          .setTimestamp()
-          .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
+      
+      const updatedEmbed = new EmbedBuilder()
+        .setTitle('🎉 Giveaway en Cours 🎉')
+        .setDescription(`
+          **🎁 Prix** : ${giveaway.prix}
+          **🏆 Gagnants** : ${giveaway.gagnants}
+          **⏳ Fin** : <t:${getUnixTimestamp(currentGiveaway.endTime)}:R>
+          **👥 Participants** : ${currentGiveaway.participants.length}
+          ${giveaway.roleRequired ? `**🔒 Rôle requis** : <@&${giveaway.roleRequired}>` : ''}
+        `)
+        .setColor(0xA8E4A0)
+        .setThumbnail(message.guild.iconURL({ dynamic: true }))
+        .setFooter({ text: `ID: ${giveaway.giveawayId}`, iconURL: message.guild.iconURL({ dynamic: true }) })
+        .setTimestamp()
+        .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
 
-        if (giveaway.commentaire) {
-          updatedEmbed.addFields({ name: '📝 **Informations supplémentaires :**', value: `${giveaway.commentaire}` });
-        }
+      if (giveaway.commentaire) {
+        updatedEmbed.addFields({ name: '📝 **Informations supplémentaires :**', value: `${giveaway.commentaire}` });
+      }
 
-        await message.edit({ embeds: [updatedEmbed] }).catch(() => {
-          clearInterval(interval);
-          activeIntervals.delete(giveaway.messageId);
-        });
-      } catch (error) {
-        console.error('Erreur dans le compte à rebours classique:', error);
+      await message.edit({ embeds: [updatedEmbed] }).catch(() => {
         clearInterval(interval);
         activeIntervals.delete(giveaway.messageId);
-      }
-    }, 30000); // Mise à jour toutes les 30 secondes
-    
-    // Stocker l'intervalle pour gestion future
-    activeIntervals.set(giveaway.messageId, interval);
-  }
-
-  static async endTournamentPhase(message, giveaway) {
-    const currentGiveaway = giveawaysCache.get(giveaway.messageId);
-    if (!currentGiveaway) return;
-
-    // Nettoyer l'intervalle
-    if (activeIntervals.has(currentGiveaway.messageId)) {
-      clearInterval(activeIntervals.get(currentGiveaway.messageId));
-      activeIntervals.delete(currentGiveaway.messageId);
-    }
-
-    // Sélectionner les gagnants par tirage au sort
-    const qualifiedUsers = [...currentGiveaway.participants]
-      .sort(() => Math.random() - 0.5)
-      .slice(0, currentGiveaway.gagnants);
-
-    currentGiveaway.qualified_users = qualifiedUsers;
-    saveGiveaway(currentGiveaway);
-
-    const qualifiedMembers = qualifiedUsers.map(id => message.guild.members.cache.get(id)).filter(Boolean);
-    const organizer = await message.guild.members.fetch(currentGiveaway.organizer).catch(() => null);
-    
-    const resultEmbed = new EmbedBuilder()
-      .setTitle(`🏆 Phase ${currentGiveaway.phase_number} Terminée !`)
-      .setDescription(
-        qualifiedMembers.length
-          ? `**🎉 Qualifiés pour la phase suivante (${qualifiedMembers.length}/${currentGiveaway.gagnants}) :**\n${qualifiedMembers.map(m => `• ${m.user.tag} (<@${m.id}>)`).join('\n')}`
-          : '❌ Aucun participant pour cette phase.'
-      )
-      .setColor(0xFF9999)
-      .addFields(
-        { name: '🎁 Prix Final', value: currentGiveaway.prix, inline: true },
-        { name: '🔢 Phase', value: `${currentGiveaway.phase_number}/${currentGiveaway.total_phases}`, inline: true },
-        { name: '👥 Participants totaux', value: `${currentGiveaway.participants.length}`, inline: true },
-        { name: '👤 Organisateur', value: organizer ? `<@${organizer.id}>` : 'Inconnu', inline: true }
-      )
-      .setThumbnail(message.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: `ID: ${currentGiveaway.giveawayId} Tournoi - Phase ${currentGiveaway.phase_number} terminée`, iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTimestamp()
-      .setImage(currentGiveaway.image || 'https://i.imgur.com/w5JVwaR.png');
-
-    if (currentGiveaway.commentaire) {
-      resultEmbed.addFields({
-        name: '📝 **Informations supplémentaires :**',
-        value: `${currentGiveaway.commentaire}`,
-        inline: false
       });
+    } catch (error) {
+      console.error('Erreur dans le compte à rebours classique:', error);
+      clearInterval(interval);
+      activeIntervals.delete(giveaway.messageId);
     }
-
-    await message.edit({ embeds: [resultEmbed], components: [] });
-
-    if (currentGiveaway.phase_number < currentGiveaway.total_phases) {
-      await this.startNextPhase(message, currentGiveaway);
-    } else {
-      await this.endTournament(message, currentGiveaway);
-    }
-
-    deleteGiveaway(currentGiveaway.messageId);
-  }
-
-  static async startNextPhase(originalMessage, previousPhase) {
-    const nextPhaseNumber = previousPhase.phase_number + 1;
-    const phases = {
-      2: {
-        name: 'Phase 2 - Demi-finales',
-        duration: '2h',
-        winners: Math.ceil(previousPhase.gagnants * 0.5),
-        phaseNumber: 2,
-        totalPhases: 3
-      },
-      3: {
-        name: 'Phase Finale',
-        duration: '1h',
-        winners: Math.max(1, Math.ceil(previousPhase.gagnants * 0.3)),
-        phaseNumber: 3,
-        totalPhases: 3
-      }
-    };
-
-    const nextPhase = phases[nextPhaseNumber];
-    if (!nextPhase) return;
-
-    const durationMs = this.parseDuration(nextPhase.duration);
-    const endTime = Date.now() + durationMs;
-    
-    const embed = new EmbedBuilder()
-      .setTitle(`🏆 Tournoi - ${nextPhase.name} ${this.getPhaseEmoji(nextPhaseNumber)}`)
-      .setDescription(`
-        **🎁 Prix Final** : ${previousPhase.prix}
-        **🏆 Gagnants Phase** : ${nextPhase.winners}
-        **⏳ Fin** : <t:${getUnixTimestamp(endTime)}:R>
-        **🔢 Phase** : ${nextPhaseNumber}/${nextPhase.totalPhases}
-        **👥 Qualifiés** : ${previousPhase.qualified_users.length}
-       
-        *Bonne chance aux qualifiés de la phase précédente !*
-      `)
-      .setColor(0xA8E4A0)
-      .setThumbnail(originalMessage.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: `ID: ${previousPhase.giveawayId} Tournoi - Phase ${nextPhaseNumber}`, iconURL: originalMessage.guild.iconURL({ dynamic: true }) })
-      .setTimestamp()
-      .setImage(previousPhase.image || 'https://i.imgur.com/w5JVwaR.png');
-
-    if (previousPhase.commentaire) {
-      embed.addFields({ name: '📝 **Informations supplémentaires :**', value: `${previousPhase.commentaire}` });
-    }
-
-    const row = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder().setCustomId('show_participants').setLabel('Participants').setStyle(ButtonStyle.Secondary).setEmoji('👥'),
-        new ButtonBuilder().setCustomId('tournament_leaderboard').setLabel('Classement').setStyle(ButtonStyle.Secondary).setEmoji('🏆')
-      );
-
-    const message = await originalMessage.channel.send({
-      content: `🎉 **PHASE SUIVANTE !** Félicitations aux qualifiés : ${previousPhase.qualified_users.map(id => `<@${id}>`).join(', ')}`,
-      embeds: [embed],
-      components: [row]
-    });
-
-    const newGiveaway = {
-      messageId: message.id,
-      channelId: originalMessage.channelId,
-      guildId: originalMessage.guildId,
-      prix: previousPhase.prix,
-      gagnants: nextPhase.winners,
-      endTime: endTime,
-      participants: previousPhase.qualified_users,
-      roleRequired: previousPhase.roleRequired,
-      commentaire: previousPhase.commentaire,
-      image: previousPhase.image,
-      organizer: previousPhase.organizer,
-      tournament_phase: 'tournament',
-      parent_tournament_id: previousPhase.parent_tournament_id,
-      phase_number: nextPhaseNumber,
-      total_phases: nextPhase.totalPhases,
-      qualified_users: [],
-      giveawayId: `${previousPhase.giveawayId}-PH${nextPhaseNumber}`
-    };
-
-    saveGiveaway(newGiveaway);
-    this.startPhaseCountdown(message, newGiveaway, nextPhase, durationMs);
-  }
-
-  static async endTournament(message, finalPhase) {
-    // Nettoyer l'intervalle
-    if (activeIntervals.has(finalPhase.messageId)) {
-      clearInterval(activeIntervals.get(finalPhase.messageId));
-      activeIntervals.delete(finalPhase.messageId);
-    }
-
-    const winners = finalPhase.qualified_users;
-    const winnerMembers = winners.map(id => message.guild.members.cache.get(id)).filter(Boolean);
-    const organizer = await message.guild.members.fetch(finalPhase.organizer).catch(() => null);
-    
-    const winnerEmbed = new EmbedBuilder()
-      .setTitle('🎊 TOURNOI TERMINÉ ! 🎊')
-      .setDescription(
-        winnerMembers.length
-          ? `**🏆 GRANDS GAGNANTS DU TOURNOI !**\n${winnerMembers.map(w => `• ${w.user.tag} (<@${w.id}>)`).join('\n')}\n\nFélicitations à tous les participants !`
-          : '❌ Aucun gagnant pour ce tournoi.'
-      )
-      .setColor(0xFF9999)
-      .addFields(
-        { name: '🎁 Prix', value: finalPhase.prix, inline: true },
-        { name: '🏆 Gagnants', value: `${winnerMembers.length}`, inline: true },
-        { name: '🔢 Phases', value: `${finalPhase.total_phases}`, inline: true },
-        { name: '👤 Organisateur', value: organizer ? `<@${organizer.id}>` : 'Inconnu', inline: true }
-      )
-      .setThumbnail(message.guild.iconURL({ dynamic: true }))
-      .setFooter({ text: `ID: ${finalPhase.giveawayId} Tournoi terminé - Félicitations !`, iconURL: message.guild.iconURL({ dynamic: true }) })
-      .setTimestamp()
-      .setImage(finalPhase.image || 'https://i.imgur.com/w5JVwaR.png');
-
-    if (finalPhase.commentaire) {
-      winnerEmbed.addFields({
-        name: '📝 **Informations supplémentaires :**',
-        value: `${finalPhase.commentaire}`,
-        inline: false
-      });
-    }
-
-    await message.channel.send({ embeds: [winnerEmbed] });
-    await createPrivateThreadForWinners(message.channel, winners, finalPhase);
-    deleteGiveaway(finalPhase.messageId);
-  }
+  }, 30000);
+  
+  activeIntervals.set(giveaway.messageId, interval);
 }
 
 // Fonction pour créer un fil privé pour les gagnants
@@ -599,21 +219,27 @@ async function createPrivateThreadForWinners(channel, winners, giveaway) {
     
     if (!channel.permissionsFor(channel.guild.members.me).has(PermissionsBitField.Flags.CreatePrivateThreads)) {
       console.log('❌ Pas de permission pour créer un fil privé');
+      const winnerMentions = winnerMembers.map(m => `<@${m.id}>`).join(' ');
+      await channel.send({
+        content: `🎉 Félicitations ${winnerMentions} ! Vous avez gagné **${giveaway.prix}** ! Contactez <@${giveaway.organizer}> pour réclamer votre prix.`
+      });
       return;
     }
     
-    const threadName = `🎉 Gagnants - ${giveaway.prix.substring(0, 50)}`;
-   
-    const thread = await channel.threads.create({
-      name: threadName,
-      autoArchiveDuration: 1440,
-      type: ChannelType.PrivateThread,
-      reason: 'Fil privé pour les gagnants du giveaway'
-    });
+const threadName = `🎉 Gagnants - ${giveaway.prix.substring(0, 50)}`;
+
+const thread = await channel.threads.create({
+  name: threadName,
+  autoArchiveDuration: 10080,
+  type: ChannelType.PrivateThread,
+  reason: 'Fil privé pour les gagnants du giveaway',
+  topic: `🎉 Gagnants du giveaway ${giveaway.giveawayId} - Prix: ${giveaway.prix}`
+});
     
     for (const member of winnerMembers) {
       try {
         await thread.members.add(member.id);
+        console.log(`✅ Ajouté ${member.user.tag} au fil privé`);
       } catch (error) {
         console.log(`❌ Impossible d'ajouter ${member.user.tag} au fil:`, error.message);
       }
@@ -622,6 +248,7 @@ async function createPrivateThreadForWinners(channel, winners, giveaway) {
     try {
       const organizer = await channel.guild.members.fetch(giveaway.organizer);
       await thread.members.add(organizer);
+      console.log(`✅ Ajouté l'organisateur ${organizer.user.tag} au fil privé`);
     } catch (error) {
       console.log('❌ Impossible d\'ajouter l\'organisateur au fil:', error.message);
     }
@@ -648,10 +275,18 @@ async function createPrivateThreadForWinners(channel, winners, giveaway) {
       embeds: [welcomeEmbed]
     });
     
-    const winnerMentions = winnerMembers.map(m => `<@${m.id}>`).join(' ');
-    await channel.send(`🎉 Félicitations ${winnerMentions} ! Vous avez gagné ! Consultez le thread privé ${thread} pour plus de détails.`);
+    console.log(`✅ Fil privé créé pour les gagnants du giveaway ${giveaway.giveawayId}`);
+    return thread;
   } catch (error) {
     console.error('❌ Erreur lors de la création du fil privé:', error);
+    const winnerMembers = winners.map(id => channel.guild.members.cache.get(id)).filter(Boolean);
+    if (winnerMembers.length > 0) {
+      const winnerMentions = winnerMembers.map(m => `<@${m.id}>`).join(' ');
+      await channel.send({
+        content: `🎉 Félicitations ${winnerMentions} ! Vous avez gagné **${giveaway.prix}** ! Contactez <@${giveaway.organizer}> pour réclamer votre prix.`
+      });
+    }
+    return null;
   }
 }
 
@@ -676,20 +311,19 @@ async function restartAllGiveaways() {
   
   const rows = db.prepare('SELECT * FROM giveaways').all();
   let restartedCount = 0;
+  let expiredCount = 0;
   
   for (const row of rows) {
     try {
       row.participants = JSON.parse(row.participants || '[]');
-      row.qualified_users = JSON.parse(row.qualified_users || '[]');
       
-      // Vérifier si le giveaway est toujours valide
       const remainingTime = row.endTime - Date.now();
       
       if (remainingTime <= 0) {
-        // Giveaway expiré, le terminer
+        console.log(`⚠️ Giveaway ${row.giveawayId} expiré, traitement...`);
         await processExpiredGiveaway(row);
+        expiredCount++;
       } else {
-        // Relancer le compteur
         await restartGiveawayCountdown(row);
         restartedCount++;
       }
@@ -698,13 +332,12 @@ async function restartAllGiveaways() {
     }
   }
   
-  console.log(`✅ ${restartedCount} compteurs de giveaways redémarrés`);
+  console.log(`✅ ${restartedCount} compteurs de giveaways redémarrés, ${expiredCount} giveaways expirés traités`);
 }
 
 // Fonction pour relancer un compteur de giveaway spécifique
 async function restartGiveawayCountdown(giveaway) {
   try {
-    // Récupérer le canal et le message
     const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
     if (!channel) {
       console.log(`❌ Canal ${giveaway.channelId} introuvable pour le giveaway ${giveaway.giveawayId}`);
@@ -719,23 +352,9 @@ async function restartGiveawayCountdown(giveaway) {
     
     const remainingTime = giveaway.endTime - Date.now();
     
-    // Mettre à jour le cache
     giveawaysCache.set(giveaway.messageId, giveaway);
     
-    // Relancer le compteur approprié
-    if (giveaway.tournament_phase === 'tournament') {
-      const phase = {
-        name: giveaway.phase_number === 1 ? 'Phase 1 - Qualifications' : 
-               giveaway.phase_number === 2 ? 'Phase 2 - Demi-finales' : 'Phase Finale',
-        winners: giveaway.gagnants,
-        phaseNumber: giveaway.phase_number,
-        totalPhases: giveaway.total_phases
-      };
-      
-      await TournamentSystem.startPhaseCountdown(message, giveaway, phase, remainingTime);
-    } else {
-      await TournamentSystem.startClassicCountdown(message, giveaway, remainingTime);
-    }
+    await startClassicCountdown(message, giveaway, remainingTime);
     
     console.log(`✅ Compteur relancé pour le giveaway ${giveaway.giveawayId}`);
   } catch (error) {
@@ -746,7 +365,6 @@ async function restartGiveawayCountdown(giveaway) {
 // Fonction pour traiter les giveaways expirés
 async function processExpiredGiveaway(giveaway) {
   try {
-    // Récupérer le canal et le message
     const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
     if (!channel) {
       console.log(`❌ Canal introuvable pour le giveaway expiré ${giveaway.giveawayId}`);
@@ -761,16 +379,20 @@ async function processExpiredGiveaway(giveaway) {
       return;
     }
     
-    // Terminer le giveaway
-    if (giveaway.tournament_phase === 'tournament') {
-      await TournamentSystem.endTournamentPhase(message, giveaway);
-    } else {
-      await endClassicGiveaway(message, giveaway);
+    if (message.components.length === 0) {
+      console.log(`ℹ️ Giveaway ${giveaway.giveawayId} déjà traité, suppression...`);
+      deleteGiveaway(giveaway.messageId);
+      return;
     }
     
-    console.log(`✅ Giveaway expiré ${giveaway.giveawayId} traité`);
+    console.log(`🎯 Traitement du giveaway expiré ${giveaway.giveawayId}...`);
+    
+    await endClassicGiveaway(message, giveaway);
+    
+    console.log(`✅ Giveaway expiré ${giveaway.giveawayId} traité avec succès`);
   } catch (error) {
     console.error(`❌ Erreur lors du traitement du giveaway expiré ${giveaway.giveawayId}:`, error);
+    deleteGiveaway(giveaway.messageId);
   }
 }
 
@@ -781,7 +403,6 @@ const loadGiveaways = () => {
   
   for (const row of rows) {
     row.participants = JSON.parse(row.participants || '[]');
-    row.qualified_users = JSON.parse(row.qualified_users || '[]');
    
     if (!row.giveawayId) {
       row.giveawayId = `GIV-${Date.now()}-${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
@@ -801,9 +422,8 @@ const saveGiveaway = (giveaway) => {
     const stmt = db.prepare(`
       INSERT OR REPLACE INTO giveaways (
         messageId, channelId, guildId, prix, gagnants, endTime, participants,
-        roleRequired, commentaire, image, organizer,
-        tournament_phase, parent_tournament_id, phase_number, total_phases, qualified_users, giveawayId
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        roleRequired, commentaire, image, organizer, giveawayId
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
     stmt.run(
@@ -818,11 +438,6 @@ const saveGiveaway = (giveaway) => {
       giveaway.commentaire,
       giveaway.image,
       giveaway.organizer,
-      giveaway.tournament_phase || 'single',
-      giveaway.parent_tournament_id || null,
-      giveaway.phase_number || 1,
-      giveaway.total_phases || 1,
-      JSON.stringify(giveaway.qualified_users || []),
       giveaway.giveawayId
     );
     
@@ -836,7 +451,6 @@ const deleteGiveaway = (messageId) => {
   db.prepare('DELETE FROM giveaways WHERE messageId = ?').run(messageId);
   giveawaysCache.del(messageId);
   
-  // Nettoyer l'intervalle si il existe
   if (activeIntervals.has(messageId)) {
     clearInterval(activeIntervals.get(messageId));
     activeIntervals.delete(messageId);
@@ -876,7 +490,6 @@ async function endClassicGiveaway(message, giveaway) {
   const currentGiveaway = giveawaysCache.get(giveaway.messageId);
   if (!currentGiveaway) return;
   
-  // Nettoyer l'intervalle
   if (activeIntervals.has(currentGiveaway.messageId)) {
     clearInterval(activeIntervals.get(currentGiveaway.messageId));
     activeIntervals.delete(currentGiveaway.messageId);
@@ -890,7 +503,7 @@ async function endClassicGiveaway(message, giveaway) {
     .setTitle('🎊 Giveaway Terminé ! 🎊')
     .setDescription(
       winnerMembers.length
-        ? `**🏆 Gagnant(s) :**\n${winnerMembers.map(w => `• ${w.user.tag} (<@${w.id}>)`).join('\n')}`
+        ? `**🏆 Gagnant(s) :**\n${winnerMembers.map(w => `• ${w.user.tag}`).join('\n')}`
         : `🥺 Aucun participant pour ce giveaway.\n💫 **Ne vous inquiétez pas !** D'autres giveaways arrivent bientôt.`
     )
     .setColor(0xFF9999)
@@ -900,7 +513,7 @@ async function endClassicGiveaway(message, giveaway) {
       { name: '👤 Organisateur', value: organizer ? `<@${organizer.id}>` : 'Inconnu', inline: false }
     )
     .setThumbnail(message.guild.iconURL({ dynamic: true }))
-    .setFooter({ text: `ID: ${currentGiveaway.giveawayId} Giveaway terminé`, iconURL: message.guild.iconURL({ dynamic: true }) })
+    .setFooter({ text: `ID: ${currentGiveaway.giveawayId}`, iconURL: message.guild.iconURL({ dynamic: true }) })
     .setTimestamp()
     .setImage(currentGiveaway.image || 'https://i.imgur.com/w5JVwaR.png');
 
@@ -913,8 +526,52 @@ async function endClassicGiveaway(message, giveaway) {
   }
 
   await message.edit({ embeds: [resultEmbed], components: [] });
-  await createPrivateThreadForWinners(message.channel, winners, currentGiveaway);
+  
+  if (winnerMembers.length > 0) {
+    const thread = await createPrivateThreadForWinners(message.channel, winners, currentGiveaway);
+    
+    // Message de notification dans le canal public sans mentionner les utilisateurs
+    if (thread) {
+      await message.channel.send({
+        content: `🎉 **GIVEAWAY TERMINÉ !** Félicitations au(x) gagnant(s) ! Vous avez gagné **${currentGiveaway.prix}** ! 🎁 Récupérez votre gain dans le fil privé : ${thread}`
+      });
+    } else {
+      await message.channel.send({
+        content: `🎉 **GIVEAWAY TERMINÉ !** Félicitations au(x) gagnant(s) ! Vous avez gagné **${currentGiveaway.prix}** ! 🎁 Contactez l'organisateur <@${currentGiveaway.organizer}> pour réclamer votre prix.`
+      });
+    }
+  } else {
+    await message.channel.send({
+      content: `🎉 **GIVEAWAY TERMINÉ !** Aucun participant pour le giveaway **${currentGiveaway.prix}**. Un nouveau giveaway sera bientôt disponible !`
+    });
+  }
+  
   deleteGiveaway(currentGiveaway.messageId);
+}
+
+// Fonction pour vérifier périodiquement les giveaways expirés
+async function checkExpiredGiveaways() {
+  console.log('🔍 Vérification des giveaways expirés...');
+  
+  const allGiveaways = giveawaysCache.keys().map(key => giveawaysCache.get(key));
+  const now = Date.now();
+  let expiredCount = 0;
+  
+  for (const giveaway of allGiveaways) {
+    try {
+      if (giveaway.endTime <= now) {
+        console.log(`⚠️ Giveaway ${giveaway.giveawayId} expiré non traité, traitement forcé...`);
+        await processExpiredGiveaway(giveaway);
+        expiredCount++;
+      }
+    } catch (error) {
+      console.error(`❌ Erreur lors de la vérification du giveaway ${giveaway.giveawayId}:`, error);
+    }
+  }
+  
+  if (expiredCount > 0) {
+    console.log(`✅ ${expiredCount} giveaways expirés traités lors de la vérification`);
+  }
 }
 
 // GESTION PRINCIPALE DES INTERACTIONS
@@ -955,13 +612,6 @@ async function handleButtonInteraction(interaction) {
     });
   }
   
-  if (customId === 'enter' && giveaway.tournament_phase === 'tournament' && giveaway.phase_number > 1) {
-    return await interaction.reply({
-      content: '❌ La participation à cette phase est fermée. Seuls les qualifiés des phases précédentes peuvent participer.',
-      flags: [MessageFlags.Ephemeral]
-    });
-  }
-  
   switch (customId) {
     case 'enter':
       await handleEnterGiveaway(interaction, giveaway);
@@ -974,9 +624,6 @@ async function handleButtonInteraction(interaction) {
       break;
     case 'show_participants':
       await handleShowParticipants(interaction, giveaway);
-      break;
-    case 'tournament_leaderboard':
-      await handleTournamentLeaderboard(interaction, giveaway);
       break;
     default:
       await interaction.reply({
@@ -1033,13 +680,6 @@ async function handleLeaveGiveaway(interaction, giveaway) {
     });
   }
   
-  if (giveaway.tournament_phase === 'tournament' && giveaway.phase_number > 1) {
-    return await interaction.reply({
-      content: '❌ Vous ne pouvez pas vous retirer de cette phase de tournoi.',
-      flags: [MessageFlags.Ephemeral]
-    });
-  }
-  
   const participantIndex = giveaway.participants.indexOf(user.id);
   if (participantIndex > -1) {
     giveaway.participants.splice(participantIndex, 1);
@@ -1081,7 +721,7 @@ async function handleCancelGiveaway(interaction, giveaway) {
     `)
     .setColor(0xE74C3C)
     .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
-    .setFooter({ text: `ID: ${giveaway.giveawayId} Giveaway annulé`, iconURL: interaction.guild.iconURL({ dynamic: true }) })
+    .setFooter({ text: `ID: ${giveaway.giveawayId}`, iconURL: interaction.guild.iconURL({ dynamic: true }) })
     .setTimestamp()
     .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
 
@@ -1124,45 +764,6 @@ async function handleShowParticipants(interaction, giveaway) {
   });
 }
 
-async function handleTournamentLeaderboard(interaction, giveaway) {
-  if (giveaway.tournament_phase !== 'tournament') {
-    return await interaction.reply({
-      content: '❌ Cette commande est réservée aux tournois.',
-      flags: [MessageFlags.Ephemeral]
-    });
-  }
-  
-  const sortedParticipants = [...giveaway.participants].sort(() => Math.random() - 0.5).slice(0, 10);
-  
-  const leaderboardList = await Promise.all(
-    sortedParticipants.map(async (userId, index) => {
-      const medals = ['🥇', '🥈', '🥉'];
-      const medal = medals[index] || `${index + 1}️⃣`;
-     
-      try {
-        const user = await client.users.fetch(userId);
-        return `${medal} **${user.username}**`;
-      } catch (error) {
-        return `${medal} <@${userId}>`;
-      }
-    })
-  );
-  
-  const finalList = leaderboardList.join('\n') || '👥 Aucun participant';
-  const leaderboardEmbed = new EmbedBuilder()
-    .setTitle(`🏆 Classement - Phase ${giveaway.phase_number}`)
-    .setDescription(finalList)
-    .setColor(0x3498DB)
-    .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
-    .setFooter({ text: `Top ${sortedParticipants.length} participants`, iconURL: interaction.guild.iconURL({ dynamic: true }) })
-    .setTimestamp();
-  
-  await interaction.reply({
-    embeds: [leaderboardEmbed],
-    flags: [MessageFlags.Ephemeral]
-  });
-}
-
 // Fonction pour mettre à jour l'embed du giveaway
 async function updateGiveawayEmbed(message, giveaway) {
   const description = `
@@ -1171,15 +772,10 @@ async function updateGiveawayEmbed(message, giveaway) {
     **⏳ Fin** : <t:${getUnixTimestamp(giveaway.endTime)}:R>
     **👥 Participants** : ${giveaway.participants.length}
     ${giveaway.roleRequired ? `**🔒 Rôle requis** : <@&${giveaway.roleRequired}>` : ''}
-    ${giveaway.tournament_phase === 'tournament' ? `\n**🔢 Phase** : ${giveaway.phase_number}/${giveaway.total_phases}\n${giveaway.phase_number === 1 ? `*Les ${giveaway.gagnants} meilleurs participants se qualifieront pour la phase suivante !*` : `*Phase réservée aux qualifiés de la phase précédente.*`}` : ''}
   `;
   
   const embed = new EmbedBuilder()
-    .setTitle(
-      giveaway.tournament_phase === 'tournament'
-        ? `🏆 Tournoi - Phase ${giveaway.phase_number} ${TournamentSystem.getPhaseEmoji(giveaway.phase_number)}`
-        : '🎉 Giveaway en Cours 🎉'
-    )
+    .setTitle('🎉 Giveaway en Cours 🎉')
     .setDescription(description)
     .setColor(0xA8E4A0)
     .setThumbnail(message.guild.iconURL({ dynamic: true }))
@@ -1197,7 +793,7 @@ async function updateGiveawayEmbed(message, giveaway) {
   await message.edit({ embeds: [embed] });
 }
 
-// Commande giveaway principale
+// Commande giveaway principale (simplifiée - seulement les giveaways classiques)
 const giveawayCommand = {
   data: new SlashCommandBuilder()
     .setName('giveaway')
@@ -1205,7 +801,7 @@ const giveawayCommand = {
     .addSubcommand(subcommand =>
       subcommand
         .setName('create')
-        .setDescription('Créer un giveaway classique')
+        .setDescription('Créer un giveaway')
         .addStringOption(option =>
           option.setName('prix')
             .setDescription('Le prix du giveaway')
@@ -1254,49 +850,6 @@ const giveawayCommand = {
             .setDescription('URL de l\'image pour le giveaway (jpg, png, gif, etc.)')
             .setRequired(false)
         )
-    )
-    .addSubcommand(subcommand =>
-      subcommand
-        .setName('tournament')
-        .setDescription('Créer un tournoi en plusieurs phases')
-        .addStringOption(option =>
-          option.setName('prix')
-            .setDescription('Le prix final du tournoi')
-            .setRequired(true)
-        )
-        .addIntegerOption(option =>
-          option.setName('gagnants_phase1')
-            .setDescription('Nombre de qualifiés pour la phase 1')
-            .setRequired(true)
-            .setMinValue(2)
-        )
-        .addStringOption(option =>
-          option.setName('duree_phase1')
-            .setDescription('Durée de la phase 1')
-            .setRequired(true)
-            .addChoices(
-              { name: '30 minutes', value: '30m' },
-              { name: '1 heure', value: '1h' },
-              { name: '3 heures', value: '3h' },
-              { name: '6 heures', value: '6h' },
-              { name: '1 jour', value: '1d' }
-            )
-        )
-        .addRoleOption(option =>
-          option.setName('role_requis')
-            .setDescription('Rôle requis pour participer (optionnel)')
-            .setRequired(false)
-        )
-        .addStringOption(option =>
-          option.setName('commentaire')
-            .setDescription('Commentaire ou informations supplémentaires (optionnel)')
-            .setRequired(false)
-        )
-        .addStringOption(option =>
-          option.setName('image')
-            .setDescription('URL de l\'image pour le tournoi (jpg, png, gif, etc.)')
-            .setRequired(false)
-        )
     ),
   async execute(interaction) {
     if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
@@ -1314,36 +867,6 @@ const giveawayCommand = {
         } catch (error) {
           console.error('Erreur création giveaway:', error);
           await interaction.editReply({ content: '❌ Erreur lors de la création du giveaway.' });
-        }
-        break;
-        
-      case 'tournament':
-        const prix = interaction.options.getString('prix');
-        const phase1Winners = interaction.options.getInteger('gagnants_phase1');
-        const phase1Duration = interaction.options.getString('duree_phase1');
-        const roleRequired = interaction.options.getRole('role_requis');
-        const commentaire = interaction.options.getString('commentaire');
-        let image = interaction.options.getString('image');
-        
-        if (image && !isValidImageUrl(image)) {
-          image = null;
-        }
-        
-        const tournamentOptions = {
-          prix,
-          phase1Winners,
-          phase1Duration,
-          roleRequired,
-          commentaire,
-          image
-        };
-        
-        try {
-          await TournamentSystem.createTournament(interaction, tournamentOptions);
-          await interaction.editReply({ content: '🎯 Tournoi créé avec succès ! Les phases se dérouleront automatiquement.' });
-        } catch (error) {
-          console.error('Erreur création tournoi:', error);
-          await interaction.editReply({ content: '❌ Erreur lors de la création du tournoi.' });
         }
         break;
     }
@@ -1429,12 +952,11 @@ async function handleClassicGiveaway(interaction) {
     commentaire: commentaire || null,
     image: image || null,
     organizer,
-    tournament_phase: 'single',
     giveawayId: giveawayId
   };
   
   saveGiveaway(giveaway);
-  TournamentSystem.startClassicCountdown(message, giveaway, duréeMs);
+  startClassicCountdown(message, giveaway, duréeMs);
 }
 
 // Enregistrement de la commande
@@ -1467,19 +989,16 @@ client.once("clientReady", async () => {
   setTimeout(async () => {
     await restartAllGiveaways();
     
-    // Planifier une vérification périodique des giveaways (sécurité supplémentaire)
+    // Planifier une vérification périodique des giveaways (toutes les 5 minutes)
     setInterval(async () => {
-      const now = Date.now();
-      const allGiveaways = giveawaysCache.keys().map(key => giveawaysCache.get(key));
-      
-      for (const giveaway of allGiveaways) {
-        if (giveaway.endTime <= now && activeIntervals.has(giveaway.messageId)) {
-          console.log(`⚠️ Giveaway ${giveaway.giveawayId} expiré mais toujours actif, traitement forcé...`);
-          await processExpiredGiveaway(giveaway);
-        }
-      }
-    }, 60000); // Vérifier toutes les minutes
-  }, 5000); // Attendre 5 secondes pour que tous les canaux soient chargés
+      await checkExpiredGiveaways();
+    }, 5 * 60 * 1000);
+    
+    // Vérification initiale
+    await checkExpiredGiveaways();
+    
+    console.log('✅ Système de vérification des giveaways activé');
+  }, 10000);
 });
 
 // Connecter le bot à Discord
