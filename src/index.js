@@ -13,6 +13,19 @@ const __dirname = path.dirname(__filename);
 // Configuration des variables d'environnement
 dotenv.config();
 
+if (!process.env.DISCORD_TOKEN) {
+  console.error('❌ DISCORD_TOKEN manquant dans le fichier .env');
+  process.exit(1);
+}
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
 // Initialisation des caches
 const cache = new NodeCache({ stdTTL: 3600, checkperiod: 600 });
 const giveawaysCache = new NodeCache({ stdTTL: 10 * 24 * 60 * 60, checkperiod: 3600 });
@@ -50,8 +63,8 @@ db.pragma('cache_size = 1000');
 db.pragma('temp_store = MEMORY');
 db.pragma('foreign_keys = ON');
 db.pragma('mmap_size = 268435456');
+db.pragma('secure_delete = ON');
 
-// Migration de la base de données
 const migrateDatabase = () => {
   try {
     const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='giveaways'").get();
@@ -84,7 +97,6 @@ const migrateDatabase = () => {
     for (const column of requiredColumns) {
       if (!columnNames.includes(column)) {
         let columnType = 'TEXT';
-       
         try {
           db.exec(`ALTER TABLE giveaways ADD COLUMN ${column} ${columnType}`);
           console.log(`✅ Colonne ${column} ajoutée`);
@@ -93,35 +105,13 @@ const migrateDatabase = () => {
         }
       }
     }
-
-    // Supprimer les colonnes liées aux tournois si elles existent
-    const tournamentColumns = ['tournament_phase', 'parent_tournament_id', 'phase_number', 'total_phases', 'qualified_users'];
-    for (const column of tournamentColumns) {
-      if (columnNames.includes(column)) {
-        try {
-          // Créer une nouvelle table sans les colonnes de tournois
-          db.exec(`
-            CREATE TABLE giveaways_new AS 
-            SELECT messageId, channelId, guildId, prix, gagnants, endTime, participants, 
-                   roleRequired, commentaire, image, organizer, giveawayId 
-            FROM giveaways
-          `);
-          db.exec('DROP TABLE giveaways');
-          db.exec('ALTER TABLE giveaways_new RENAME TO giveaways');
-          console.log(`✅ Colonnes de tournois supprimées`);
-          break;
-        } catch (error) {
-          console.log(`⚠️ Impossible de supprimer les colonnes de tournois:`, error.message);
-        }
-      }
-    }
   } catch (error) {
-    console.error('❌ Erreur lors de la migration:', error);
+    console.error('❌ Erreur migration base de données:', error);
   }
-};
+}; 
 
 // Exécuter la migration
-migrateDatabase();
+migrateDatabase(); 
 
 // Fonction pour démarrer le compte à rebours classique
 async function startClassicCountdown(message, giveaway, totalDuration) {
