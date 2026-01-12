@@ -840,7 +840,7 @@ const giveawayCommand = {
       case 'create':
         try {
           await handleClassicGiveaway(interaction);
-          await interaction.editReply({ content: '🎯 Giveaway créé avec succès !' });
+          await interaction.editReply({ content: '🎯 **Giveaway créé avec succès !**' });
         } catch (error) {
           console.error('Erreur création giveaway:', error);
           await interaction.editReply({ content: '❌ Erreur lors de la création du giveaway.' });
@@ -909,7 +909,7 @@ async function handleClassicGiveaway(interaction) {
       new ButtonBuilder().setCustomId('show_participants').setLabel('Participants').setStyle(ButtonStyle.Secondary).setEmoji('👥')
     );
     
-  const content = roleMention ? `<@&${roleMention.id}> Un nouveau giveaway vient de commencer !` : undefined;
+  const content = roleMention ? `<@&${roleMention.id}> 🎊 **UN NOUVEAU GIVEAWAY VIENT DE COMMENCER !** 🎊` : undefined;
   const message = await interaction.channel.send({
     content,
     embeds: [embed],
