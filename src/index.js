@@ -65,11 +65,13 @@ db.pragma('foreign_keys = ON');
 db.pragma('mmap_size = 268435456');
 db.pragma('secure_delete = ON');
 
-const migrateDatabase = () => {
+const initializeDatabase = () => {
   try {
+    // Vérifier simplement si la table existe
     const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='giveaways'").get();
-   
+    
     if (!tableExists) {
+      console.log('⚠️ Table giveaways non trouvée, création...');
       db.exec(`
         CREATE TABLE giveaways (
           messageId TEXT PRIMARY KEY,
@@ -87,31 +89,16 @@ const migrateDatabase = () => {
         )
       `);
       console.log('✅ Table giveaways créée');
-    }
-    
-    // Vérifier et ajouter les colonnes manquantes
-    const columns = db.prepare("PRAGMA table_info(giveaways)").all();
-    const columnNames = columns.map(col => col.name);
-    const requiredColumns = ['giveawayId'];
-    
-    for (const column of requiredColumns) {
-      if (!columnNames.includes(column)) {
-        let columnType = 'TEXT';
-        try {
-          db.exec(`ALTER TABLE giveaways ADD COLUMN ${column} ${columnType}`);
-          console.log(`✅ Colonne ${column} ajoutée`);
-        } catch (error) {
-          console.log(`⚠️ Colonne ${column} déjà présente:`, error.message);
-        }
-      }
+    } else {
+      console.log('✅ Base de données OK');
     }
   } catch (error) {
-    console.error('❌ Erreur migration base de données:', error);
+    console.error('❌ Erreur vérification base de données:', error);
   }
-}; 
+};
 
-// Exécuter la migration
-migrateDatabase(); 
+// Appeler la fonction
+initializeDatabase();; 
 
 // Fonction pour démarrer le compte à rebours classique
 async function startClassicCountdown(message, giveaway, totalDuration) {
