@@ -4,7 +4,23 @@ import path from 'path';
 import dotenv from 'dotenv';
 import Database from 'better-sqlite3';
 import NodeCache from 'node-cache';
-import { Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField, ChannelType, SlashCommandBuilder, ActivityType, REST, Routes, MessageFlags } from 'discord.js';
+import { 
+  Client, 
+  GatewayIntentBits, 
+  Partials, 
+  EmbedBuilder, 
+  ActionRowBuilder, 
+  ButtonBuilder, 
+  ButtonStyle, 
+  PermissionsBitField, 
+  ChannelType, 
+  SlashCommandBuilder, 
+  ActivityType, 
+  REST, 
+  Routes, 
+  MessageFlags,
+  Events
+} from 'discord.js';
 
 // ==================== CONFIGURATION INITIALE ====================
 
@@ -28,6 +44,15 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error);
 });
+
+// ==================== IMAGES DES GIVEAWAYS ====================
+
+const GIVEAWAY_IMAGES = {
+  active:    'https://i.imgur.com/h5t1NPw.png', // Nouveau giveaway & giveaway en cours
+  ended:     'https://i.imgur.com/h5t1NPw.png', // Giveaway terminé
+  cancelled: 'https://i.imgur.com/Xd0D0UJ.png', // Giveaway annulé
+  winners:   'https://i.imgur.com/cpg5KVR.png', // Fil privé gagnants
+};
 
 // ==================== INITIALISATION DES CACHES ====================
 
@@ -69,6 +94,11 @@ function selectWinners(participants, winnerCount) {
   return shuffled.slice(0, Math.min(winnerCount, participants.length));
 }
 
+// Fonction utilitaire pour obtenir l'avatar du bot
+function getBotAvatarURL() {
+  return client.user?.displayAvatarURL({ dynamic: true }) ?? null;
+}
+
 // ==================== BASE DE DONNÉES ====================
 
 // Initialisation de la base de données SQLite
@@ -78,18 +108,13 @@ const db = new Database(path.join(__dirname, 'giveaways.db'), {
   timeout: 5000
 });
 
-// Configuration pragma optimisée
-db.pragma('journal_mode = WAL');
-db.pragma('synchronous = NORMAL');
-db.pragma('cache_size = -100000');  // ~100MB
-db.pragma('temp_store = MEMORY');
-db.pragma('foreign_keys = ON');
-db.pragma('mmap_size = 300000000'); // 300MB
-db.pragma('page_size = 4096');
-db.pragma('auto_vacuum = INCREMENTAL');
-db.pragma('locking_mode = NORMAL');
-db.pragma('journal_size_limit = 67108864'); // 64MB pour le journal WAL
-db.pragma('secure_delete = ON');
+    // Configuration pragma optimisée
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('cache_size = -64000');
+    db.pragma('temp_store = MEMORY');
+    db.pragma('foreign_keys = ON');
+    db.pragma('busy_timeout = 5000');
 
 const initializeDatabase = () => {
   try {
@@ -274,19 +299,20 @@ function generateProgressBar(giveaway) {
 
 function createGiveawayEmbed(giveaway, guild) {
   const progress = generateProgressBar(giveaway);
-  
+  const botAvatar = getBotAvatarURL();
+
   const embed = new EmbedBuilder()
     .setTitle('🎉 Giveaway en Cours 🎉')
     .setColor(progress.color)
-    .setThumbnail(guild.iconURL({ dynamic: true }))
+    .setThumbnail(botAvatar)
     .setFooter({ 
       text: `ID: ${giveaway.giveawayId}`,
-      iconURL: guild.iconURL({ dynamic: true })
+      iconURL: botAvatar
     })
     .setTimestamp()
-    .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
+    .setImage(GIVEAWAY_IMAGES.active);
 
-  // Construction de la description avec le même format que les giveaways terminés
+  // Construction de la description
   let descriptionContent = '';
 
   // 1. Prix
@@ -306,7 +332,7 @@ function createGiveawayEmbed(giveaway, guild) {
     descriptionContent += `**🔒 Rôle requis :**\n<@&${giveaway.roleRequired}>\n\n`;
   }
 
-  // 6. Barre de progression (légèrement modifiée pour correspondre au format)
+  // 6. Barre de progression
   descriptionContent += `**⏱️ Progression :**\n${progress.percentage}%\n\`${progress.progressBar}\`\n\n`;
 
   // 7. Informations supplémentaires (optionnel)
@@ -314,25 +340,26 @@ function createGiveawayEmbed(giveaway, guild) {
     descriptionContent += `**📝 Informations supplémentaires :**\n${giveaway.commentaire}`;
   }
 
-  // Appliquer la description à l'embed
   embed.setDescription(descriptionContent);
 
   return embed;
 }
 
 function createEndedGiveawayEmbed(giveaway, winnerMembers, organizer) {
+  const botAvatar = getBotAvatarURL();
+
   const embed = new EmbedBuilder()
     .setTitle('🎊 Giveaway Terminé ! 🎊')
     .setColor(0xFF9999)
-    .setThumbnail(giveaway.guildId ? client.guilds.cache.get(giveaway.guildId)?.iconURL({ dynamic: true }) : null)
+    .setThumbnail(botAvatar)
     .setFooter({ 
       text: `ID: ${giveaway.giveawayId}`,
-      iconURL: giveaway.guildId ? client.guilds.cache.get(giveaway.guildId)?.iconURL({ dynamic: true }) : null
+      iconURL: botAvatar
     })
     .setTimestamp()
-    .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
+    .setImage(GIVEAWAY_IMAGES.ended);
 
-  // Construction de la description avec le format standard
+  // Construction de la description
   let descriptionContent = '';
 
   // 1. Prix
@@ -357,7 +384,6 @@ function createEndedGiveawayEmbed(giveaway, winnerMembers, organizer) {
     descriptionContent += `\n\n**📝 Informations supplémentaires :**\n${giveaway.commentaire}`;
   }
 
-  // Appliquer la description à l'embed
   embed.setDescription(descriptionContent);
 
   return embed;
@@ -415,19 +441,21 @@ async function createPrivateThreadForWinners(channel, winners, giveaway) {
       console.log('❌ Impossible d\'ajouter l\'organisateur au fil:', error.message);
     }
     
-    // Créer l'embed de félicitations avec le même format descriptionContent
+    const botAvatar = getBotAvatarURL();
+
+    // Embed de félicitations pour le fil privé gagnants
     const embed = new EmbedBuilder()
       .setTitle('🎊 Félicitations aux Gagnants ! 🎊')
       .setColor(0xA8E4A0)
-      .setThumbnail(channel.guild.iconURL({ dynamic: true }))
+      .setThumbnail(botAvatar)
       .setFooter({ 
         text: `ID: ${giveaway.giveawayId}`, 
-        iconURL: channel.guild.iconURL({ dynamic: true }) 
+        iconURL: botAvatar
       })
       .setTimestamp()
-      .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
+      .setImage(GIVEAWAY_IMAGES.winners);
 
-    // Construction de la description avec le même format
+    // Construction de la description
     let descriptionContent = '';
 
     // 1. Prix gagné
@@ -450,7 +478,6 @@ async function createPrivateThreadForWinners(channel, winners, giveaway) {
     // 6. Instructions pour la discussion
     descriptionContent += `**💬 Discussion :**\nUtilisez ce fil pour coordonner la réception de votre prix avec l'organisateur.`;
 
-    // Appliquer la description à l'embed
     embed.setDescription(descriptionContent);
     
     await thread.send({
@@ -544,7 +571,7 @@ async function endClassicGiveaway(message, giveaway) {
   const winnerMembers = winners.map(id => message.guild.members.cache.get(id)).filter(Boolean);
   const organizer = await message.guild.members.fetch(currentGiveaway.organizer).catch(() => null);
   
-  // Créer l'embed terminé avec le nouveau format
+  // Créer l'embed terminé
   const resultEmbed = createEndedGiveawayEmbed(currentGiveaway, winnerMembers, organizer);
   
   await message.edit({ embeds: [resultEmbed], components: [] });
@@ -552,7 +579,6 @@ async function endClassicGiveaway(message, giveaway) {
   if (winnerMembers.length > 0) {
     const thread = await createPrivateThreadForWinners(message.channel, winners, currentGiveaway);
     
-    // Message de notification dans le canal public sans mentionner les utilisateurs
     if (thread) {
       await message.channel.send({
         content: `🎉 **GIVEAWAY TERMINÉ !** Félicitations au(x) gagnant(s) ! Vous avez gagné **${currentGiveaway.prix}** ! 🎁 Récupérez votre gain dans le fil privé : ${thread}`
@@ -667,10 +693,8 @@ async function restartAllGiveaways() {
     try {
       row.participants = JSON.parse(row.participants || '[]');
       
-      // Assurez-vous que les données temporelles sont complètes
       if (!row.startTime && row.endTime && row.duration) {
         row.startTime = row.endTime - row.duration;
-        // Mettez à jour la base de données
         const updateStmt = db.prepare('UPDATE giveaways SET startTime = ? WHERE messageId = ?');
         updateStmt.run(row.startTime, row.messageId);
       }
@@ -766,20 +790,21 @@ async function handleCancelGiveaway(interaction, giveaway) {
   }
   
   const organizer = await interaction.guild.members.fetch(giveaway.organizer).catch(() => null);
-  
-  // Créer un embed d'annulation avec le même format
+  const botAvatar = getBotAvatarURL();
+
+  // Embed d'annulation
   const embed = new EmbedBuilder()
     .setTitle('❌ Giveaway Annulé ❌')
     .setColor(0xE74C3C)
-    .setThumbnail(interaction.guild.iconURL({ dynamic: true }))
+    .setThumbnail(botAvatar)
     .setFooter({ 
       text: `ID: ${giveaway.giveawayId}`, 
-      iconURL: interaction.guild.iconURL({ dynamic: true }) 
+      iconURL: botAvatar
     })
     .setTimestamp()
-    .setImage(giveaway.image || 'https://i.imgur.com/w5JVwaR.png');
+    .setImage(GIVEAWAY_IMAGES.cancelled);
 
-  // Construction de la description avec le même format
+  // Construction de la description
   let descriptionContent = '';
 
   // 1. Prix
@@ -805,7 +830,6 @@ async function handleCancelGiveaway(interaction, giveaway) {
     descriptionContent += `**📝 Informations supplémentaires :**\n${giveaway.commentaire}`;
   }
 
-  // Appliquer la description à l'embed
   embed.setDescription(descriptionContent);
 
   await interaction.message.edit({ embeds: [embed], components: [] });
@@ -830,7 +854,7 @@ async function handleShowParticipants(interaction, giveaway) {
     .setTitle('📋 Liste des Participants')
     .setDescription(participantsList)
     .setColor(0x3498DB)
-    .setFooter({ text: 'Participants actuels', iconURL: interaction.guild.iconURL({ dynamic: true }) })
+    .setFooter({ text: 'Participants actuels'})
     .setTimestamp();
   
   await interaction.reply({
@@ -1062,8 +1086,8 @@ function updateActivity() {
   client.user.setActivity(`Je suis sur ${client.guilds.cache.size} serveurs`, { type: ActivityType.Custom });
 }
 
-// GESTION PRINCIPALE DES INTERACTIONS
-client.on('interactionCreate', async (interaction) => {
+// ✅ GESTION PRINCIPALE DES INTERACTIONS avec Events.InteractionCreate
+client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isCommand()) {
     const command = client.commands.get(interaction.commandName);
     if (!command) return;
@@ -1088,17 +1112,17 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Événements du client
-client.on("guildCreate", async guild => {
+// ✅ Événements du client avec Events.GuildCreate et Events.GuildDelete
+client.on(Events.GuildCreate, async (guild) => {
   updateActivity();
 });
 
-client.on("guildDelete", async guild => {
+client.on(Events.GuildDelete, async (guild) => {
   updateActivity();
 });
 
-// Événement clientReady
-client.once("clientReady", async () => {
+// ✅ Événement ClientReady avec Events.ClientReady
+client.once(Events.ClientReady, async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}!`);
  
   try {
