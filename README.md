@@ -35,6 +35,14 @@ DISCORD_TOKEN=VOTRE_TOKEN_DE_BOT
 CLIENT_ID=VOTRE_CLIENT_ID
 ```
 
+## Ajouter le bot
+
+- Les permissions nécessaires pour ajouter le bot à vos serveurs
+
+```plaintext
+https://discord.com/oauth2/authorize?client_id=ID_BOT&permissions=68719733840&scope=bot+applications.commands
+```
+
 4. Lancez le bot avec `node index.js`.
 
 ## Commandes
