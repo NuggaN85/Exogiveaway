@@ -34,6 +34,7 @@ Ce bot permet aux administrateurs de créer des giveaways avec des prix, un nomb
 DISCORD_TOKEN=VOTRE_TOKEN_DE_BOT
 CLIENT_ID=VOTRE_CLIENT_ID
 ```
+4. Lancez le bot avec `node index.js`.
 
 ## Ajouter le bot
 
@@ -42,8 +43,6 @@ CLIENT_ID=VOTRE_CLIENT_ID
 ```plaintext
 https://discord.com/oauth2/authorize?client_id=ID_BOT&permissions=68719733840&scope=bot+applications.commands
 ```
-
-4. Lancez le bot avec `node index.js`.
 
 ## Commandes
 
