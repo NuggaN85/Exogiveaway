@@ -6,10 +6,13 @@ import dotenv from 'dotenv';
 import Database from 'better-sqlite3';
 import NodeCache from 'node-cache';
 import {
-  Client, GatewayIntentBits, Partials, EmbedBuilder,
+  Client, GatewayIntentBits, Partials,
   ActionRowBuilder, ButtonBuilder, ButtonStyle,
   PermissionsBitField, ChannelType, SlashCommandBuilder,
-  ActivityType, REST, Routes, MessageFlags, Events
+  ActivityType, REST, Routes, MessageFlags, Events,
+  ContainerBuilder, TextDisplayBuilder, SeparatorBuilder,
+  SeparatorSpacingSize, ThumbnailBuilder, SectionBuilder,
+  MediaGalleryBuilder, MediaGalleryItemBuilder,
 } from 'discord.js';
 
 // ==================== INIT ====================
@@ -27,7 +30,6 @@ process.on('uncaughtException',  (e)    => console.error('Uncaught Exception:', 
 
 const MAX_PRIX_LENGTH    = 256;
 const MAX_COMMENT_LENGTH = 512;
-const EMBED_DESC_LIMIT   = 4096;
 const PARTICIPANT_CD     = 3000;
 const COMMAND_CD         = 1500;
 const PARTICIPANTS_PAGE  = 20;
@@ -37,6 +39,18 @@ const GIVEAWAY_IMAGES = {
   ended:     'https://i.imgur.com/h5t1NPw.png',
   cancelled: 'https://i.imgur.com/Xd0D0UJ.png',
   winners:   'https://i.imgur.com/cpg5KVR.png',
+};
+
+// Couleurs en entier (hex) pour ContainerBuilder.setAccentColor
+const COLORS = {
+  green:   0xA8E4A0,
+  yellow:  0xFFD580,
+  orange:  0xFF9966,
+  red:     0xFF9999,
+  blue:    0x3498DB,
+  grey:    0x95A5A6,
+  crimson: 0xE74C3C,
+  gold:    0xFFD700,
 };
 
 // ==================== CACHES ====================
@@ -115,7 +129,6 @@ function buildDrawPool(participants, memberCache, bonusRoles) {
 }
 
 let clientInstance = null;
-function getBotAvatarURL() { return clientInstance?.user?.displayAvatarURL({ dynamic: true }) ?? null; }
 
 // ==================== BASE DE DONNÉES ====================
 
@@ -148,7 +161,8 @@ db.exec(`
     duration     INTEGER NOT NULL,
     bonusRoles   TEXT DEFAULT '{}',
     drawHash     TEXT,
-    scheduledStart INTEGER
+    scheduledStart INTEGER,
+    roleMention     TEXT
   );
 
   CREATE TABLE IF NOT EXISTS giveaway_history (
@@ -221,6 +235,10 @@ if (!cols.includes('scheduledStart')) {
   db.exec('ALTER TABLE giveaways ADD COLUMN scheduledStart INTEGER');
   console.log('✅ Colonne scheduledStart ajoutée');
 }
+if (!cols.includes('roleMention')) {
+  db.exec('ALTER TABLE giveaways ADD COLUMN roleMention TEXT');
+  console.log('✅ Colonne roleMention ajoutée');
+}
 
 console.log('✅ Base de données initialisée');
 
@@ -230,8 +248,8 @@ const stmts = {
   upsertGiveaway: db.prepare(`
     INSERT OR REPLACE INTO giveaways
       (messageId,channelId,guildId,prix,gagnants,endTime,participants,
-       roleRequired,commentaire,image,organizer,startTime,duration,bonusRoles,drawHash,scheduledStart)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       roleRequired,commentaire,image,organizer,startTime,duration,bonusRoles,drawHash,scheduledStart,roleMention)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `),
   deleteGiveaway:     db.prepare('DELETE FROM giveaways WHERE messageId = ?'),
   selectAll:          db.prepare('SELECT * FROM giveaways'),
@@ -304,13 +322,13 @@ function saveGuildConfig(config) {
   guildConfigCache.set(config.guildId, config);
 }
 
-async function postToLogChannel(guildId, embed) {
+async function postToLogChannel(guildId, container) {
   try {
     const config = getGuildConfig(guildId);
     if (!config.logChannelId) return;
     const channel = await clientInstance.channels.fetch(config.logChannelId).catch(() => null);
     if (!channel) return;
-    await channel.send({ embeds: [embed] });
+    await channel.send({ components: [container], flags: [MessageFlags.IsComponentsV2] });
   } catch {}
 }
 
@@ -326,7 +344,8 @@ function saveGiveaway(giveaway) {
     giveaway.startTime, giveaway.duration,
     JSON.stringify(giveaway.bonusRoles ?? {}),
     giveaway.drawHash ?? null,
-    giveaway.scheduledStart ?? null
+    giveaway.scheduledStart ?? null,
+    giveaway.roleMention ?? null
   );
   giveawaysCache.set(giveaway.messageId, giveaway);
 }
@@ -363,6 +382,7 @@ function loadGiveaways() {
   for (const row of rows) {
     row.participants = JSON.parse(row.participants || '[]');
     row.bonusRoles   = JSON.parse(row.bonusRoles   || '{}');
+    row.roleMention  = row.roleMention ?? null;
     if (!row.startTime && row.duration) {
       row.startTime = row.endTime - row.duration;
       stmts.updateStartTime.run(row.startTime, row.messageId);
@@ -372,77 +392,360 @@ function loadGiveaways() {
   return rows;
 }
 
-// ==================== EMBEDS ====================
+// ==================== COMPONENTS V2 BUILDERS ====================
 
 function generateProgressBar(giveaway) {
   const { startTime, endTime } = giveaway;
-  if (!startTime || !endTime) return { progressBar: '░'.repeat(20), color: '#FF9999', percentage: 0 };
+  if (!startTime || !endTime) return { progressBar: '░'.repeat(20), color: COLORS.red, percentage: 0 };
   const total = endTime - startTime;
-  if (total <= 0) return { progressBar: '█'.repeat(20), color: '#FF9999', percentage: 100 };
+  if (total <= 0) return { progressBar: '█'.repeat(20), color: COLORS.red, percentage: 100 };
   const elapsed    = Math.max(0, Date.now() - startTime);
   const remaining  = Math.max(0, endTime - Date.now());
   const percentage = Math.round(Math.min(100, (elapsed / total) * 100));
   const remainPct  = (remaining / total) * 100;
-  const color = remainPct > 66 ? '#A8E4A0' : remainPct > 33 ? '#FFD580' : remainPct > 10 ? '#FF9966' : '#FF9999';
+  const color = remainPct > 66 ? COLORS.green : remainPct > 33 ? COLORS.yellow : remainPct > 10 ? COLORS.orange : COLORS.red;
   const filled = Math.round((percentage / 100) * 20);
   return { progressBar: '█'.repeat(filled) + '░'.repeat(20 - filled), color, percentage };
 }
 
-function createGiveawayEmbed(giveaway, guild) {
-  const progress  = generateProgressBar(giveaway);
-  const botAvatar = getBotAvatarURL();
-  const guildIcon = guild?.iconURL({ dynamic: true }) ?? botAvatar;
+/**
+ * Giveaway actif — Container v2
+ */
+function createGiveawayContainer(giveaway, guild) {
+  const progress   = generateProgressBar(giveaway);
   const hasBonuses = Object.keys(giveaway.bonusRoles ?? {}).length > 0;
 
-  let desc = `**🎁 Prix :**\n${sanitize(giveaway.prix, MAX_PRIX_LENGTH)}\n\n`;
-  desc += `**👥 Participants :**\n${giveaway.participants.length}\n\n`;
-  desc += `**🏆 Gagnants :**\n${giveaway.gagnants}\n\n`;
-  desc += `**⏳ Fin :**\n<t:${toUnix(giveaway.endTime)}:R> • <t:${toUnix(giveaway.endTime)}:d>\n\n`;
-  if (giveaway.roleRequired) desc += `**🔒 Rôle requis :**\n<@&${giveaway.roleRequired}>\n\n`;
+  // --- Ligne de bonus roles si besoin ---
+  let bonusText = '';
   if (hasBonuses) {
-    const lines = Object.entries(giveaway.bonusRoles).map(([r, t]) => `<@&${r}> → ${t} ticket${t > 1 ? 's' : ''}`).join('\n');
-    desc += `**🎟️ Tickets bonus :**\n${lines}\n\n`;
+    const lines = Object.entries(giveaway.bonusRoles)
+      .map(([r, t]) => `<@&${r}> → ${t} ticket${t > 1 ? 's' : ''}`)
+      .join('\n');
+    bonusText = `\n\n**🎟️ Tickets bonus :**\n${lines}`;
   }
-  desc += `**⏱️ Progression :** ${progress.percentage}%\n\`${progress.progressBar}\`\n\n`;
-  if (giveaway.commentaire) desc += `**📝 Informations supplémentaires :**\n${sanitize(giveaway.commentaire, MAX_COMMENT_LENGTH)}`;
 
-  return new EmbedBuilder()
-    .setTitle('🎉 Giveaway en Cours 🎉')
-    .setDescription(desc.slice(0, EMBED_DESC_LIMIT))
-    .setColor(progress.color)
-    .setThumbnail(botAvatar)
-    .setFooter({ text: guild?.name ?? '​', iconURL: guildIcon })
-    .setTimestamp()
-    .setImage(giveaway.image || GIVEAWAY_IMAGES.active);
+  const roleText = giveaway.roleRequired ? `\n\n**🔒 Rôle requis :**<@&${giveaway.roleRequired}>` : '';
+  const mentionText = giveaway.roleMention ? `\n\n**📣 Rôle mentionné :**<@&${giveaway.roleMention}>` : '';
+  const commentText = giveaway.commentaire
+    ? `\n\n**📝 Informations supplémentaires :**\n${sanitize(giveaway.commentaire, MAX_COMMENT_LENGTH)}`
+    : '';
+
+  const mainText =
+    `**🎁 Prix :** ${sanitize(giveaway.prix, MAX_PRIX_LENGTH)}\n\n` +
+    `**👥 Participants :** ${giveaway.participants.length}\n\n` +
+    `**🏆 Gagnants :** ${giveaway.gagnants}\n\n` +
+    `**⏳ Fin :** <t:${toUnix(giveaway.endTime)}:R> • <t:${toUnix(giveaway.endTime)}:d>` +
+    roleText + mentionText + bonusText +
+    `\n\n**⏱️ Progression :** ${progress.percentage}%\n\`${progress.progressBar}\`` +
+    commentText;
+
+  const container = new ContainerBuilder()
+    .setAccentColor(progress.color);
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('# 🎉 Giveaway en Cours 🎉')
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(mainText)
+  );
+
+  // Image du giveaway
+  const imageUrl = giveaway.image || GIVEAWAY_IMAGES.active;
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+  container.addMediaGalleryComponents(
+    new MediaGalleryBuilder().addItems(
+      new MediaGalleryItemBuilder().setURL(imageUrl)
+    )
+  );
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addActionRowComponents(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('enter').setLabel('Participer').setStyle(ButtonStyle.Secondary).setEmoji('🎉'),
+      new ButtonBuilder().setCustomId('leave').setLabel('Se retirer').setStyle(ButtonStyle.Secondary).setEmoji('🚪'),
+      new ButtonBuilder().setCustomId('cancel').setLabel('Annuler').setStyle(ButtonStyle.Secondary).setEmoji('❌'),
+      new ButtonBuilder().setCustomId('show_participants').setLabel('Participants').setStyle(ButtonStyle.Secondary).setEmoji('👥')
+    )
+  );
+
+  return container;
 }
 
-function createEndedGiveawayEmbed(giveaway, winnerMembers, organizer, drawHash, guild) {
-  const botAvatar = getBotAvatarURL();
-  const guildIcon = guild?.iconURL({ dynamic: true }) ?? botAvatar;
-  let desc = `**🎁 Prix :**\n${sanitize(giveaway.prix)}\n\n`;
-  desc += `**👥 Participants :**\n${giveaway.participants.length}\n\n`;
-  if (winnerMembers.length) {
-    desc += `**🏆 Gagnant(s) :**\n${winnerMembers.map(w => `<@${w.id}>`).join(', ')}\n\n`;
-  } else {
-    desc += `**🏆 Gagnant(s) :**\n🥺 Aucun participant.\n\n`;
-  }
-  desc += `**👤 Organisateur :**\n${organizer ? `<@${organizer.id}>` : 'Inconnu'}\n\n`;
-  if (drawHash) desc += `**🔐 Hash de vérification :**\n\`${drawHash}\`\n*Utilisez \`/giveaway verify ${drawHash}\` pour vérifier ce tirage*\n\n`;
-  if (giveaway.commentaire) desc += `**📝 Informations supplémentaires :**\n${sanitize(giveaway.commentaire)}`;
+/**
+ * Giveaway terminé — Container v2
+ */
+function createEndedGiveawayContainer(giveaway, winnerMembers, organizer, drawHash, guild) {
+  const winnersText = winnerMembers.length
+    ? winnerMembers.map(w => `<@${w.id}>`).join(', ')
+    : '🥺 Aucun participant.';
 
-  return new EmbedBuilder()
-    .setTitle('🎊 Giveaway Terminé ! 🎊')
-    .setDescription(desc.slice(0, EMBED_DESC_LIMIT))
-    .setColor(0xFF9999)
-    .setThumbnail(botAvatar)
-    .setFooter({ text: guild?.name ?? '​', iconURL: guildIcon })
-    .setTimestamp()
-    .setImage(giveaway.image || GIVEAWAY_IMAGES.ended);
+  const organizerText = organizer ? `<@${organizer.id}>` : 'Inconnu';
+
+  const commentText = giveaway.commentaire
+    ? `\n\n**📝 Informations supplémentaires :**\n${sanitize(giveaway.commentaire)}`
+    : '';
+
+  const mainText =
+    `**🎁 Prix :** ${sanitize(giveaway.prix)}\n\n` +
+    `**👥 Participants :** ${giveaway.participants.length}\n\n` +
+    `**🏆 Gagnant(s) :**${winnersText}\n\n` +
+    `**👤 Organisateur :** ${organizerText}` +
+    commentText;
+
+  const container = new ContainerBuilder()
+    .setAccentColor(COLORS.red);
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('# 🎊 Giveaway Terminé ! 🎊')
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(mainText)
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+  container.addMediaGalleryComponents(
+    new MediaGalleryBuilder().addItems(
+      new MediaGalleryItemBuilder().setURL(giveaway.image || GIVEAWAY_IMAGES.ended)
+    )
+  );
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  return container;
+}
+
+/**
+ * Giveaway annulé — Container v2
+ */
+function createCancelledContainer(giveaway, organizer, guild) {
+  const organizerText = organizer ? `<@${organizer.id}>` : 'Inconnu';
+  const commentText = giveaway.commentaire
+    ? `\n\n**📝 Informations supplémentaires :**\n${sanitize(giveaway.commentaire)}`
+    : '';
+
+  const mainText =
+    `**🎁 Prix :** ${sanitize(giveaway.prix)}\n\n` +
+    `**👥 Participants :** ${giveaway.participants.length}\n\n` +
+    `**👤 Organisateur :** ${organizerText}\n\n` +
+    `❌ **ANNULÉ** — D'autres giveaways arrivent bientôt !` +
+    commentText;
+
+  const container = new ContainerBuilder()
+    .setAccentColor(COLORS.crimson);
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('# ❌ Giveaway Annulé')
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(mainText)
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+  container.addMediaGalleryComponents(
+    new MediaGalleryBuilder().addItems(
+      new MediaGalleryItemBuilder().setURL(GIVEAWAY_IMAGES.cancelled)
+    )
+  );
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  return container;
+}
+
+/**
+ * Fil privé gagnants — Container v2
+ */
+function createWinnersThreadContainer(giveaway, guild, drawHash, winnerMembers) {
+  const hashText = drawHash
+    ? `\n\n**🔐 Hash de vérification :**\n\`${drawHash}\`\n*Utilisez \`/giveaway verify ${drawHash}\` pour vérifier ce tirage*`
+    : '';
+
+  const winnersLine = winnerMembers?.length
+    ? `\n\n**🏆 Gagnant(s) :**${winnerMembers.map(m => `<@${m.id}>`).join(' ')}`
+    : '';
+
+  const mainText =
+    `**🎁 Prix :** ${sanitize(giveaway.prix)}` +
+    winnersLine +
+    hashText +
+    `\n\nUtilisez ce fil pour coordonner la remise de votre prix.` +
+    (giveaway.commentaire ? `\n\n**📝 Informations supplémentaires :**\n${sanitize(giveaway.commentaire)}` : '');
+
+  const container = new ContainerBuilder()
+    .setAccentColor(COLORS.green);
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('# 🎊 Félicitations !')
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(mainText)
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+  container.addMediaGalleryComponents(
+    new MediaGalleryBuilder().addItems(
+      new MediaGalleryItemBuilder().setURL(GIVEAWAY_IMAGES.winners)
+    )
+  );
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  return container;
+}
+
+/**
+ * Giveaway planifié — Container v2
+ */
+function createScheduledContainer(giveaway, duréeInput, guild) {
+  const { scheduledStart, endTime, gagnants, prix, roleRequired, commentaire, roleMention } = giveaway;
+
+  const mainText =
+    `**🎁 Prix :** ${sanitize(prix)}\n\n` +
+    `**🏆 Gagnants :** ${gagnants}\n\n` +
+    `**🕐 Début :** <t:${toUnix(scheduledStart)}:F> (<t:${toUnix(scheduledStart)}:R>)\n\n` +
+    `**⏱️ Durée :** ${duréeInput}\n\n` +
+    `**⏳ Fin prévue :** <t:${toUnix(endTime)}:F>` +
+    (roleRequired ? `\n\n**🔒 Rôle requis :** <@&${roleRequired}>` : '') +
+    (roleMention ? `\n\n**📣 Rôle mentionné :** <@&${roleMention}>` : '') +
+    (commentaire ? `\n\n**📝 Informations supplémentaires :**\n${commentaire}` : '');
+
+  const container = new ContainerBuilder()
+    .setAccentColor(COLORS.blue);
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('# 📅 Giveaway Planifié')
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(mainText)
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+  container.addMediaGalleryComponents(
+    new MediaGalleryBuilder().addItems(
+      new MediaGalleryItemBuilder().setURL(GIVEAWAY_IMAGES.active)
+    )
+  );
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  return container;
+}
+
+/**
+ * Reminder DM — Container v2
+ */
+function createDMReminderContainer(giveaway) {
+  const container = new ContainerBuilder()
+    .setAccentColor(COLORS.yellow);
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('# ⏰ Rappel Giveaway')
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
+      `Un giveaway auquel vous participez se termine bientôt !\n\n` +
+      `**🎁 Prix :** ${sanitize(giveaway.prix)}\n\n` +
+      `**⏳ Fin :** <t:${toUnix(giveaway.endTime)}:R>\n\n` +
+      `Bonne chance ! 🍀`
+    )
+  );
+
+  return container;
+}
+
+/**
+ * Log container générique — Container v2
+ */
+function createLogContainer(title, content, color = COLORS.green) {
+  const container = new ContainerBuilder()
+    .setAccentColor(color);
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`# ${title}`)
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(content)
+  );
+
+  return container;
+}
+
+/**
+ * Info container générique (réponses slash) — Container v2
+ */
+function createInfoContainer(title, content, color = COLORS.blue) {
+  const container = new ContainerBuilder()
+    .setAccentColor(color);
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`# ${title}`)
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(content)
+  );
+
+  return container;
 }
 
 // ==================== FIN DE GIVEAWAY ====================
 
-async function createPrivateThreadForWinners(channel, winners, giveaway) {
+async function createPrivateThreadForWinners(channel, winners, giveaway, drawHash) {
   if (!winners.length) return null;
   const winnerMembers = winners.map(id => channel.guild.members.cache.get(id)).filter(Boolean);
   if (!winnerMembers.length) return null;
@@ -451,7 +754,9 @@ async function createPrivateThreadForWinners(channel, winners, giveaway) {
     .has(PermissionsBitField.Flags.CreatePrivateThreads);
 
   if (!hasPerm) {
-    await channel.send({ content: `🎉 ${winnerMembers.map(m => `<@${m.id}>`).join(' ')} — Contactez <@${giveaway.organizer}> pour votre prix !` });
+    await channel.send({
+      content: `🎉 ${winnerMembers.map(m => `<@${m.id}>`).join(' ')} — Contactez <@${giveaway.organizer}> pour votre prix !`
+    });
     return null;
   }
 
@@ -465,21 +770,12 @@ async function createPrivateThreadForWinners(channel, winners, giveaway) {
     for (const m of winnerMembers) await thread.members.add(m.id).catch(() => {});
     try { const org = await channel.guild.members.fetch(giveaway.organizer); await thread.members.add(org).catch(() => {}); } catch {}
 
-    const botAvatar = getBotAvatarURL();
-    const embed = new EmbedBuilder()
-      .setTitle('🎊 Félicitations !')
-      .setDescription(
-        `**🎁 Prix :** ${sanitize(giveaway.prix)}\n\n` +
-        `**🏆 Gagnants :** ${winnerMembers.map(m => `<@${m.id}>`).join(', ')}\n\n` +
-        `**👤 Organisateur :** <@${giveaway.organizer}>\n\n` +
-        `Utilisez ce fil pour coordonner la remise de votre prix.` +
-        (giveaway.commentaire ? `\n\n**📝 Informations supplémentaires :**\n${sanitize(giveaway.commentaire)}` : '')
-      )
-      .setColor(0xA8E4A0).setThumbnail(botAvatar)
-      .setFooter({ text: channel.guild?.name ?? '​', iconURL: channel.guild?.iconURL({ dynamic: true }) ?? botAvatar })
-      .setTimestamp().setImage(GIVEAWAY_IMAGES.winners);
+    const container = createWinnersThreadContainer(giveaway, channel.guild, drawHash, winnerMembers);
 
-    await thread.send({ content: `🎉 ${winnerMembers.map(m => `<@${m.id}>`).join(' ')}`, embeds: [embed] });
+    await thread.send({
+      components: [container],
+      flags: [MessageFlags.IsComponentsV2]
+    });
     return thread;
   } catch (e) { console.error('createPrivateThread:', e); return null; }
 }
@@ -492,17 +788,10 @@ async function sendDMReminders(giveaway) {
     try {
       const user = await clientInstance.users.fetch(userId).catch(() => null);
       if (!user) continue;
+      const container = createDMReminderContainer(giveaway);
       await user.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('⏰ Rappel Giveaway')
-          .setDescription(
-            `Un giveaway auquel vous participez se termine bientôt !\n\n` +
-            `**🎁 Prix :** ${sanitize(giveaway.prix)}\n` +
-            `**⏳ Fin :** <t:${toUnix(giveaway.endTime)}:R>\n\n` +
-            `Bonne chance ! 🍀`
-          )
-          .setColor(0xFFD580)
-        ]
+        components: [container],
+        flags: [MessageFlags.IsComponentsV2]
       }).catch(() => {});
     } catch {}
   }
@@ -538,7 +827,12 @@ function scheduleNextUpdate(message, giveaway) {
       await endClassicGiveaway(message, current);
       return;
     }
-    try { await message.edit({ embeds: [createGiveawayEmbed(current, message.guild)] }); } catch { activeTimers.delete(giveaway.messageId); return; }
+    try {
+      await message.edit({
+        components: [createGiveawayContainer(current, message.guild)],
+        flags: [MessageFlags.IsComponentsV2]
+      });
+    } catch { activeTimers.delete(giveaway.messageId); return; }
     scheduleNextUpdate(message, current);
   }, delay);
 
@@ -547,7 +841,12 @@ function scheduleNextUpdate(message, giveaway) {
 
 async function startClassicCountdown(message, giveaway) {
   giveawaysCache.set(giveaway.messageId, giveaway);
-  try { await message.edit({ embeds: [createGiveawayEmbed(giveaway, message.guild)] }); } catch {}
+  try {
+    await message.edit({
+      components: [createGiveawayContainer(giveaway, message.guild)],
+      flags: [MessageFlags.IsComponentsV2]
+    });
+  } catch {}
   scheduleNextUpdate(message, giveaway);
 }
 
@@ -574,11 +873,14 @@ async function endClassicGiveaway(message, giveaway) {
   archiveGiveaway(current, winners, drawHash);
   auditLog(current.guildId, 'GIVEAWAY_END', clientInstance.user.id, null, { winners, participants: current.participants.length, drawHash });
 
-  const resultEmbed = createEndedGiveawayEmbed(current, winnerMembers, organizer, drawHash, message.guild);
-  await message.edit({ embeds: [resultEmbed], components: [] }).catch(() => {});
+  const resultContainer = createEndedGiveawayContainer(current, winnerMembers, organizer, drawHash, message.guild);
+  await message.edit({
+    components: [resultContainer],
+    flags: [MessageFlags.IsComponentsV2]
+  }).catch(() => {});
 
   if (winnerMembers.length > 0) {
-    const thread = await createPrivateThreadForWinners(message.channel, winners, current);
+    const thread = await createPrivateThreadForWinners(message.channel, winners, current, drawHash);
     await message.channel.send({
       content: thread
         ? `🎉 **GIVEAWAY TERMINÉ !** Les gagnants ont gagné **${sanitize(current.prix)}** ! 🎁 ${thread}`
@@ -588,16 +890,14 @@ async function endClassicGiveaway(message, giveaway) {
     await message.channel.send({ content: `🎉 **GIVEAWAY TERMINÉ !** Aucun participant pour **${sanitize(current.prix)}**.` });
   }
 
-  await postToLogChannel(current.guildId, new EmbedBuilder()
-    .setTitle('📋 Giveaway Terminé')
-    .setDescription(
-      `**Prix :** ${sanitize(current.prix)}\n` +
-      `**Gagnants :** ${winners.map(id => `<@${id}>`).join(', ') || 'Aucun'}\n` +
-      `**Participants :** ${current.participants.length}\n` +
-      `**Hash :** \`${drawHash}\``
-    )
-    .setColor(0xA8E4A0).setTimestamp()
-  );
+  await postToLogChannel(current.guildId, createLogContainer(
+    '📋 Giveaway Terminé',
+    `**Prix :** ${sanitize(current.prix)}\n` +
+    `**Gagnants :** ${winners.map(id => `<@${id}>`).join(', ') || 'Aucun'}\n` +
+    `**Participants :** ${current.participants.length}\n` +
+    `**Hash :** \`${drawHash}\``,
+    COLORS.green
+  ));
 
   deleteGiveaway(current.messageId);
 }
@@ -677,7 +977,10 @@ async function handleEnterGiveaway(interaction, giveaway) {
     const ticketMsg = tickets > 1 ? ` Vous avez **${tickets} tickets** !` : '';
 
     await interaction.reply({ content: `<:Valider:1407373060784521287> Vous avez rejoint le giveaway ! Bonne chance !${ticketMsg}`, flags: [MessageFlags.Ephemeral] });
-    await interaction.message.edit({ embeds: [createGiveawayEmbed(fresh, interaction.guild)] }).catch(() => {});
+    await interaction.message.edit({
+      components: [createGiveawayContainer(fresh, interaction.guild)],
+      flags: [MessageFlags.IsComponentsV2]
+    }).catch(() => {});
     auditLog(guild.id, 'PARTICIPANT_ENTER', user.id, null);
   } finally { participationLock.delete(lockKey); }
 }
@@ -696,7 +999,10 @@ async function handleLeaveGiveaway(interaction, giveaway) {
   fresh.participants = fresh.participants.filter(id => id !== user.id);
   saveGiveaway(fresh);
   await interaction.reply({ content: '<:Valider:1407373060784521287> Vous avez été Retiré du giveaway ! Dommage !', flags: [MessageFlags.Ephemeral] });
-  await interaction.message.edit({ embeds: [createGiveawayEmbed(fresh, interaction.guild)] }).catch(() => {});
+  await interaction.message.edit({
+    components: [createGiveawayContainer(fresh, interaction.guild)],
+    flags: [MessageFlags.IsComponentsV2]
+  }).catch(() => {});
 }
 
 async function handleCancelGiveaway(interaction, giveaway) {
@@ -705,29 +1011,20 @@ async function handleCancelGiveaway(interaction, giveaway) {
     return interaction.reply({ content: '<:Erreur:1407372995176960132> Seul l\'organisateur ou un admin peut annuler.', flags: [MessageFlags.Ephemeral] });
 
   const organizer = await guild.members.fetch(giveaway.organizer).catch(() => null);
-  const botAvatar = getBotAvatarURL();
+  const container = createCancelledContainer(giveaway, organizer, guild);
 
-  const embed = new EmbedBuilder()
-    .setTitle('❌ Giveaway Annulé')
-    .setDescription(
-      `**🎁 Prix :** ${sanitize(giveaway.prix)}\n\n` +
-      `**👥 Participants :** ${giveaway.participants.length}\n\n` +
-      `**👤 Organisateur :** ${organizer ? `<@${organizer.id}>` : 'Inconnu'}\n\n` +
-      `❌ **ANNULÉ** — D'autres giveaways arrivent bientôt !` +
-      (giveaway.commentaire ? `\n\n**📝 Informations supplémentaires :**\n${sanitize(giveaway.commentaire)}` : '')
-    )
-    .setColor(0xE74C3C).setThumbnail(botAvatar)
-    .setFooter({ text: guild?.name ?? '​', iconURL: guild?.iconURL({ dynamic: true }) ?? botAvatar })
-    .setTimestamp().setImage(GIVEAWAY_IMAGES.cancelled);
+  await interaction.message.edit({
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
+  });
 
-  await interaction.message.edit({ embeds: [embed], components: [] });
   auditLog(guild.id, 'GIVEAWAY_CANCEL', interaction.user.id, null);
 
-  await postToLogChannel(guild.id, new EmbedBuilder()
-    .setTitle('❌ Giveaway Annulé')
-    .setDescription(`**Prix :** ${sanitize(giveaway.prix)}\n**Par :** <@${interaction.user.id}>`)
-    .setColor(0xE74C3C).setTimestamp()
-  );
+  await postToLogChannel(guild.id, createLogContainer(
+    '❌ Giveaway Annulé',
+    `**Prix :** ${sanitize(giveaway.prix)}\n**Par :** <@${interaction.user.id}>`,
+    COLORS.crimson
+  ));
 
   deleteGiveaway(giveaway.messageId);
   await interaction.reply({ content: '<:Attention:1407372958501965914> Giveaway annulé.', flags: [MessageFlags.Ephemeral] });
@@ -743,13 +1040,13 @@ async function handleShowParticipants(interaction, giveaway, page = 0) {
   const paginated  = giveaway.participants.slice(page * PARTICIPANTS_PAGE, (page + 1) * PARTICIPANTS_PAGE);
   const list       = paginated.map(id => `<@${id}>`).join(', ') || 'Aucun participant.';
 
-  const embed = new EmbedBuilder()
-    .setTitle(`📋 Participants (page ${page + 1}/${totalPages})`)
-    .setDescription(list.slice(0, EMBED_DESC_LIMIT))
-    .setColor(0x3498DB)
-    .setTimestamp();
+  const container = createInfoContainer(
+    `📋 Participants (page ${page + 1}/${totalPages})`,
+    list.slice(0, 4000),
+    COLORS.blue
+  );
 
-  const row = new ActionRowBuilder().addComponents(
+  const navRow = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`participants_prev:${giveaway.messageId}:${page}`)
       .setLabel('◀ Précédent').setStyle(ButtonStyle.Secondary)
@@ -760,7 +1057,17 @@ async function handleShowParticipants(interaction, giveaway, page = 0) {
       .setDisabled(page >= totalPages - 1)
   );
 
-  const opts = { embeds: [embed], components: totalPages > 1 ? [row] : [], flags: [MessageFlags.Ephemeral] };
+  if (totalPages > 1) {
+    container.addSeparatorComponents(
+      new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(false)
+    );
+    container.addActionRowComponents(navRow);
+  }
+
+  const opts = {
+    components: [container],
+    flags: [MessageFlags.Ephemeral, MessageFlags.IsComponentsV2]
+  };
   if (interaction.replied || interaction.deferred) {
     await interaction.editReply(opts);
   } else {
@@ -839,31 +1146,26 @@ async function handleClassicGiveaway(interaction) {
     messageId: '', channelId: interaction.channelId, guildId: interaction.guildId,
     prix, gagnants, endTime, startTime, duration: duréeMs, participants: [],
     roleRequired: roleReq?.id ?? null, commentaire: commentaire || null,
-    image: image || null, organizer, bonusRoles: {}, drawHash: null, scheduledStart: null
+    image: image || null, organizer, bonusRoles: {}, drawHash: null, scheduledStart: null,
+    roleMention: roleMention?.id ?? null
   };
 
-  const embed = createGiveawayEmbed(giveaway, interaction.guild);
-  const row   = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('enter').setLabel('Participer').setStyle(ButtonStyle.Secondary).setEmoji('🎉'),
-    new ButtonBuilder().setCustomId('leave').setLabel('Se retirer').setStyle(ButtonStyle.Secondary).setEmoji('🚪'),
-    new ButtonBuilder().setCustomId('cancel').setLabel('Annuler').setStyle(ButtonStyle.Secondary).setEmoji('❌'),
-    new ButtonBuilder().setCustomId('show_participants').setLabel('Participants').setStyle(ButtonStyle.Secondary).setEmoji('👥')
-  );
+  const container = createGiveawayContainer(giveaway, interaction.guild);
 
   const msg = await interaction.channel.send({
-    content: roleMention ? `<@&${roleMention.id}> 🎊 **UN NOUVEAU GIVEAWAY VIENT DE COMMENCER !** 🎊` : undefined,
-    embeds: [embed], components: [row]
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
   });
 
   giveaway.messageId = msg.id;
   saveGiveaway(giveaway);
   auditLog(giveaway.guildId, 'GIVEAWAY_CREATE', organizer, null, { prix, gagnants, duration: duréeInput });
 
-  await postToLogChannel(giveaway.guildId, new EmbedBuilder()
-    .setTitle('🎉 Giveaway Créé')
-    .setDescription(`**Prix :** ${sanitize(prix)}\n**Par :** <@${organizer}>\n**Durée :** ${duréeInput}`)
-    .setColor(0xA8E4A0).setTimestamp()
-  );
+  await postToLogChannel(giveaway.guildId, createLogContainer(
+    '🎉 Giveaway Créé',
+    `**Prix :** ${sanitize(prix)}\n**Par :** <@${organizer}>\n**Durée :** ${duréeInput}`,
+    COLORS.green
+  ));
 
   startClassicCountdown(msg, giveaway);
 }
@@ -894,7 +1196,7 @@ async function handleScheduledGiveaway(interaction) {
     '1w': 7*86400*1000,
   };
 
-  const duréeMs       = duréeMap[duréeInput];
+  const duréeMs        = duréeMap[duréeInput];
   const scheduledStart = scheduledDate.getTime();
   const giveaway = {
     messageId: '', channelId: interaction.channelId, guildId: interaction.guildId,
@@ -907,28 +1209,15 @@ async function handleScheduledGiveaway(interaction) {
     commentaire:  commentaire || null,
     image:        null, organizer,
     bonusRoles:   {}, drawHash: null,
-    scheduledStart
+    scheduledStart,
+    roleMention:  roleMention?.id ?? null
   };
 
-  const botAvatar = getBotAvatarURL();
-  const previewEmbed = new EmbedBuilder()
-    .setTitle('📅 Giveaway Planifié')
-    .setDescription(
-      `**🎁 Prix :** ${sanitize(prix)}\n\n` +
-      `**🏆 Gagnants :** ${gagnants}\n\n` +
-      `**🕐 Début :** <t:${toUnix(scheduledStart)}:F> (<t:${toUnix(scheduledStart)}:R>)\n\n` +
-      `**⏱️ Durée :** ${duréeInput}\n\n` +
-      `**⏳ Fin prévue :** <t:${toUnix(scheduledStart + duréeMs)}:F>\n\n` +
-      (roleReq ? `**🔒 Rôle requis :** <@&${roleReq.id}>\n\n` : '') +
-      (commentaire ? `**📝 Informations supplémentaires :**\n${commentaire}` : '')
-    )
-    .setColor(0x3498DB).setThumbnail(botAvatar)
-    .setFooter({ text: interaction.guild?.name ?? '​', iconURL: interaction.guild?.iconURL({ dynamic: true }) ?? botAvatar })
-    .setTimestamp().setImage(GIVEAWAY_IMAGES.active);
+  const container = createScheduledContainer(giveaway, duréeInput, interaction.guild);
 
   const msg = await interaction.channel.send({
-    content: roleMention ? `<@&${roleMention.id}> 📅 **UN GIVEAWAY EST PLANIFIÉ !**` : undefined,
-    embeds: [previewEmbed]
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
   });
 
   giveaway.messageId = msg.id;
@@ -947,18 +1236,13 @@ async function handleScheduledGiveaway(interaction) {
     saveGiveaway(g);
 
     const channel = await clientInstance.channels.fetch(g.channelId).catch(() => null);
-    const liveEmbed = createGiveawayEmbed(g, channel?.guild);
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('enter').setLabel('Participer').setStyle(ButtonStyle.Secondary).setEmoji('🎉'),
-      new ButtonBuilder().setCustomId('leave').setLabel('Se retirer').setStyle(ButtonStyle.Secondary).setEmoji('🚪'),
-      new ButtonBuilder().setCustomId('cancel').setLabel('Annuler').setStyle(ButtonStyle.Secondary).setEmoji('❌'),
-      new ButtonBuilder().setCustomId('show_participants').setLabel('Participants').setStyle(ButtonStyle.Secondary).setEmoji('👥')
-    );
+    const liveContainer = createGiveawayContainer(g, channel?.guild);
 
-    await msg.edit({ embeds: [liveEmbed], components: [row] }).catch(() => {});
-    if (roleMention) {
-      await msg.channel.send({ content: `<@&${roleMention.id}> 🎊 **LE GIVEAWAY VIENT DE COMMENCER !** 🎊` }).catch(() => {});
-    }
+    await msg.edit({
+      components: [liveContainer],
+      flags: [MessageFlags.IsComponentsV2]
+    }).catch(() => {});
+
     startClassicCountdown(msg, g);
   }, msUntilStart);
 }
@@ -997,16 +1281,18 @@ async function handleReroll(interaction) {
   const newWinners   = selectWinners(participants, 1);
   const winnerMember = newWinners[0] ? interaction.guild.members.cache.get(newWinners[0]) : null;
 
-  const embed = new EmbedBuilder()
-    .setTitle('🔄 Nouveau Tirage (Reroll) !')
-    .setDescription(
-      winnerMember
-        ? `**🏆 Nouveau gagnant :** <@${winnerMember.id}>\n\n**🎁 Prix :** ${sanitize(row.prix)}`
-        : '🥺 Impossible de sélectionner un gagnant.'
-    )
-    .setColor(0xA8E4A0).setTimestamp();
+  const container = createInfoContainer(
+    '🔄 Nouveau Tirage (Reroll) !',
+    winnerMember
+      ? `**🏆 Nouveau gagnant :** <@${winnerMember.id}>\n\n**🎁 Prix :** ${sanitize(row.prix)}`
+      : '🥺 Impossible de sélectionner un gagnant.',
+    COLORS.green
+  );
 
-  await interaction.editReply({ embeds: [embed] });
+  await interaction.editReply({
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
+  });
   auditLog(interaction.guildId, 'GIVEAWAY_REROLL', interaction.user.id, null, { newWinners });
 }
 
@@ -1023,18 +1309,22 @@ async function handleList(interaction) {
     return `${scheduled}**${sanitize(g.prix, 60)}** — fin <t:${toUnix(g.endTime)}:R> — ${g.participants.length} participants`;
   });
 
-  await interaction.editReply({ embeds: [
-    new EmbedBuilder()
-      .setTitle(`📋 Giveaways actifs (${active.length})`)
-      .setDescription(lines.join('\n').slice(0, EMBED_DESC_LIMIT))
-      .setColor(0x3498DB).setTimestamp()
-  ]});
+  const container = createInfoContainer(
+    `📋 Giveaways actifs (${active.length})`,
+    lines.join('\n').slice(0, 4000),
+    COLORS.blue
+  );
+
+  await interaction.editReply({
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
+  });
 }
 
 async function handleInfo(interaction) {
   const hash = interaction.options.getString('hash');
   let target = null;
-  
+
   for (const key of giveawaysCache.keys()) {
     const g = giveawaysCache.get(key);
     if (g?.messageId === hash && g?.guildId === interaction.guildId) { target = g; break; }
@@ -1044,21 +1334,26 @@ async function handleInfo(interaction) {
     const hist = stmts.getHistoryByHash.get(hash.toUpperCase(), interaction.guildId);
     if (!hist) return interaction.editReply({ content: '<:Erreur:1407372995176960132> Hash introuvable dans les giveaways actifs ou l\'historique.' });
     const winners = JSON.parse(hist.winners || '[]');
-    return interaction.editReply({ embeds: [new EmbedBuilder()
-      .setTitle('📜 Historique Giveaway')
-      .setDescription(
-        `**🎁 Prix :** ${sanitize(hist.prix)}\n` +
-        `**👥 Participants :** ${hist.participants}\n` +
-        `**🏆 Gagnant(s) :** ${winners.map(id => `<@${id}>`).join(', ') || 'Aucun'}\n` +
-        `**👤 Organisateur :** <@${hist.organizer}>\n` +
-        `**📅 Terminé :** <t:${toUnix(hist.endedAt)}:f>\n` +
-        (hist.drawHash ? `**🔐 Hash :** \`${hist.drawHash}\`` : '')
-      )
-      .setColor(0x95A5A6)
-      .setTimestamp()
-    ]});
+    const container = createInfoContainer(
+      '📜 Historique Giveaway',
+      `**🎁 Prix :** ${sanitize(hist.prix)}\n` +
+      `**👥 Participants :** ${hist.participants}\n` +
+      `**🏆 Gagnant(s) :** ${winners.map(id => `<@${id}>`).join(', ') || 'Aucun'}\n` +
+      `**👤 Organisateur :** <@${hist.organizer}>\n` +
+      `**📅 Terminé :** <t:${toUnix(hist.endedAt)}:f>` +
+      (hist.drawHash ? `\n**🔐 Hash :** \`${hist.drawHash}\`` : ''),
+      COLORS.grey
+    );
+    return interaction.editReply({
+      components: [container],
+      flags: [MessageFlags.IsComponentsV2]
+    });
   }
-  await interaction.editReply({ embeds: [createGiveawayEmbed(target, interaction.guild)] });
+
+  await interaction.editReply({
+    components: [createGiveawayContainer(target, interaction.guild)],
+    flags: [MessageFlags.IsComponentsV2]
+  });
 }
 
 async function handleHistory(interaction) {
@@ -1068,10 +1363,17 @@ async function handleHistory(interaction) {
     const w = JSON.parse(r.winners || '[]');
     return `• **${sanitize(r.prix, 50)}** — ${r.participants} participants — ${w.length} gagnant(s) — <t:${toUnix(r.endedAt)}:d>${r.drawHash ? ` — \`${r.drawHash}\`` : ''}`;
   });
-  await interaction.editReply({ embeds: [new EmbedBuilder()
-    .setTitle('📜 Historique (10 derniers)').setDescription(lines.join('\n').slice(0, EMBED_DESC_LIMIT))
-    .setColor(0x95A5A6).setTimestamp()
-  ]});
+
+  const container = createInfoContainer(
+    '📜 Historique (10 derniers)',
+    lines.join('\n').slice(0, 4000),
+    COLORS.grey
+  );
+
+  await interaction.editReply({
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
+  });
 }
 
 async function handleVerify(interaction) {
@@ -1090,19 +1392,21 @@ async function handleVerify(interaction) {
   const recomputed   = hashDraw(participants, winners, hist.endedAt);
   const match        = recomputed === hist.drawHash;
 
-  await interaction.editReply({ embeds: [new EmbedBuilder()
-    .setTitle('🔐 Vérification du Tirage')
-    .setDescription(
-      `**🎁 Prix :** ${sanitize(hist.prix)}\n` +
-      `**👥 Participants :** ${hist.participants}\n` +
-      `**🏆 Gagnant(s) :** ${winners.map(id => `<@${id}>`).join(', ') || 'Aucun'}\n\n` +
-      `**🔐 Hash enregistré :** \`${hist.drawHash ?? 'N/A'}\`\n` +
-      `**🔁 Hash recalculé :** \`${recomputed}\`\n\n` +
-      `**Résultat :** ${match ? '✅ Tirage authentique — les données n\'ont pas été modifiées' : '⚠️ Hash différent — les données ont peut-être été altérées'}`
-    )
-    .setColor(match ? 0xA8E4A0 : 0xE74C3C)
-    .setTimestamp()
-  ]});
+  const container = createInfoContainer(
+    '🔐 Vérification du Tirage',
+    `**🎁 Prix :** ${sanitize(hist.prix)}\n` +
+    `**👥 Participants :** ${hist.participants}\n` +
+    `**🏆 Gagnant(s) :** ${winners.map(id => `<@${id}>`).join(', ') || 'Aucun'}\n\n` +
+    `**🔐 Hash enregistré :** \`${hist.drawHash ?? 'N/A'}\`\n` +
+    `**🔁 Hash recalculé :** \`${recomputed}\`\n\n` +
+    `**Résultat :** ${match ? '✅ Tirage authentique — les données n\'ont pas été modifiées' : '⚠️ Hash différent — les données ont peut-être été altérées'}`,
+    match ? COLORS.green : COLORS.crimson
+  );
+
+  await interaction.editReply({
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
+  });
 }
 
 async function handleBlacklist(interaction) {
@@ -1131,19 +1435,36 @@ async function handleStats(interaction) {
 
   const winRate = row.participations > 0 ? ((row.wins / row.participations) * 100).toFixed(1) : '0.0';
 
-  const embed = new EmbedBuilder()
-    .setTitle(`📊 Statistiques de ${target.username}`)
-    .setThumbnail(target.displayAvatarURL({ dynamic: true }))
-    .setDescription(
+  const container = new ContainerBuilder()
+    .setAccentColor(COLORS.blue);
+
+  container.addSectionComponents(
+    new SectionBuilder()
+      .addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(`# 📊 Statistiques de ${target.username}`)
+      )
+      .setThumbnailAccessory(
+        new ThumbnailBuilder().setURL(target.displayAvatarURL({ dynamic: true }))
+      )
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(
       `**👥 Participations :** ${row.participations}\n\n` +
       `**🏆 Victoires :** ${row.wins}\n\n` +
       `**🎯 Taux de victoire :** ${winRate}%\n\n` +
       `**📅 Dernière activité :** <t:${toUnix(row.lastUpdated)}:R>`
     )
-    .setColor(0x3498DB)
-    .setTimestamp();
+  );
 
-  await interaction.editReply({ embeds: [embed] });
+  await interaction.editReply({
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
+  });
 }
 
 async function handleLeaderboard(interaction) {
@@ -1159,12 +1480,16 @@ async function handleLeaderboard(interaction) {
     return `${medal} **${name}** — 🏆 ${r.wins} victoires / 👥 ${r.participations} participations (${rate}%)`;
   }));
 
-  await interaction.editReply({ embeds: [new EmbedBuilder()
-    .setTitle('🏆 Leaderboard des Gagnants')
-    .setDescription(lines.join('\n'))
-    .setColor(0xFFD700)
-    .setTimestamp()
-  ]});
+  const container = createInfoContainer(
+    '🏆 Leaderboard des Gagnants',
+    lines.join('\n'),
+    COLORS.gold
+  );
+
+  await interaction.editReply({
+    components: [container],
+    flags: [MessageFlags.IsComponentsV2]
+  });
 }
 
 async function handleSetup(interaction) {
@@ -1224,11 +1549,15 @@ async function handleSetup(interaction) {
       `**🔢 Max simultanés :** ${config.maxConcurrent}`,
       `**💌 Rappel DM :** ${config.dmReminder ? '✅ Activé' : '❌ Désactivé'}`,
     ];
-    await interaction.editReply({ embeds: [new EmbedBuilder()
-      .setTitle('⚙️ Configuration Giveaway')
-      .setDescription(lines.join('\n'))
-      .setColor(0x3498DB).setTimestamp()
-    ]});
+    const container = createInfoContainer(
+      '⚙️ Configuration Giveaway',
+      lines.join('\n'),
+      COLORS.blue
+    );
+    await interaction.editReply({
+      components: [container],
+      flags: [MessageFlags.IsComponentsV2]
+    });
 
   } else if (sub === 'reload') {
     guildConfigCache.del(interaction.guildId);
@@ -1401,15 +1730,7 @@ client.on(Events.GuildCreate, async (guild) => {
   try {
     const existing = stmts.getGuildConfig.get(guild.id);
     if (!existing) {
-      stmts.upsertGuildConfig.run(
-        guild.id,
-        null,
-        '[]',
-        '[]',
-        5,
-        1,
-        Date.now()
-      );
+      stmts.upsertGuildConfig.run(guild.id, null, '[]', '[]', 5, 1, Date.now());
       console.log(`✅ Config initialisée pour le serveur "${guild.name}" (${guild.id})`);
     }
 
@@ -1420,24 +1741,34 @@ client.on(Events.GuildCreate, async (guild) => {
 
     try {
       const owner = await guild.fetchOwner();
+      const welcomeContainer = new ContainerBuilder()
+        .setAccentColor(COLORS.green);
+
+      welcomeContainer.addTextDisplayComponents(
+        new TextDisplayBuilder().setContent('# 👋 Merci de m\'avoir ajouté !')
+      );
+
+      welcomeContainer.addSeparatorComponents(
+        new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+      );
+
+      welcomeContainer.addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          `Bonjour ! Je suis votre nouveau bot de giveaways sur **${guild.name}**.\n\n` +
+          `**🚀 Pour démarrer :**\n` +
+          `• \`/giveaway create\` — Créer un giveaway\n` +
+          `• \`/giveaway setup view\` — Voir la configuration\n` +
+          `• \`/giveaway setup log_channel #salon\` — Définir un canal de logs\n` +
+          `• \`/giveaway setup allow_channel #salon add\` — Restreindre à un canal\n\n` +
+          `**📋 Commandes disponibles :**\n` +
+          `\`create\` \`schedule\` \`end\` \`reroll\` \`list\` \`info\` \`history\` \`verify\` \`stats\` \`leaderboard\` \`blacklist\` \`setup\`\n\n` +
+          `Bonne chance à tous vos participants ! 🎉`
+        )
+      );
+
       await owner.send({
-        embeds: [new EmbedBuilder()
-          .setTitle('👋 Merci de m\'avoir ajouté !')
-          .setDescription(
-            `Bonjour ! Je suis votre nouveau bot de giveaways sur **${guild.name}**.\n\n` +
-            `**🚀 Pour démarrer :**\n` +
-            `• \`/giveaway create\` — Créer un giveaway\n` +
-            `• \`/giveaway setup view\` — Voir la configuration\n` +
-            `• \`/giveaway setup log_channel #salon\` — Définir un canal de logs\n` +
-            `• \`/giveaway setup allow_channel #salon add\` — Restreindre à un canal\n\n` +
-            `**📋 Commandes disponibles :**\n` +
-            `\`create\` \`schedule\` \`end\` \`reroll\` \`list\` \`info\` \`history\` \`verify\` \`stats\` \`leaderboard\` \`blacklist\` \`setup\`\n\n` +
-            `Bonne chance à tous vos participants ! 🎉`
-          )
-          .setColor(0xA8E4A0)
-          .setThumbnail(client.user.displayAvatarURL({ dynamic: true }))
-          .setTimestamp()
-        ]
+        components: [welcomeContainer],
+        flags: [MessageFlags.IsComponentsV2]
       }).catch(() => {});
     } catch {}
 
