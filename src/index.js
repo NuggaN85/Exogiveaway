@@ -497,7 +497,7 @@ function createEndedGiveawayContainer(giveaway, winnerMembers, organizer, drawHa
   const mainText =
     `**🎁 Prix :** ${sanitize(giveaway.prix)}\n\n` +
     `**👥 Participants :** ${giveaway.participants.length}\n\n` +
-    `**🏆 Gagnant(s) :**${winnersText}\n\n` +
+    `**🏆 Gagnant(s) :** ${winnersText}\n\n` +
     `**👤 Organisateur :** ${organizerText}` +
     commentText;
 
@@ -582,11 +582,11 @@ function createCancelledContainer(giveaway, organizer, guild) {
  */
 function createWinnersThreadContainer(giveaway, guild, drawHash, winnerMembers) {
   const hashText = drawHash
-    ? `\n\n**🔐 Hash de vérification :**\n\`${drawHash}\`\n*Utilisez \`/giveaway verify ${drawHash}\` pour vérifier ce tirage*`
+    ? `\n\n**🔐 Hash de vérification :** \`${drawHash}\`\n*Utilisez \`/giveaway verify ${drawHash}\` pour vérifier ce tirage*`
     : '';
 
   const winnersLine = winnerMembers?.length
-    ? `\n\n**🏆 Gagnant(s) :**${winnerMembers.map(m => `<@${m.id}>`).join(' ')}`
+    ? `\n\n**🏆 Gagnant(s) :** ${winnerMembers.map(m => `<@${m.id}>`).join(' ')}`
     : '';
 
   const mainText =
